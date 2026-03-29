@@ -907,6 +907,19 @@ class OzonePy(tk.Tk):
                 resp_type, *data = resp
                 if resp_type == 'console':
                     self.log(data[0])
+                    msg = data[0]
+                    if hasattr(self, 'download_progress') and self.download_progress:
+                        if "Loading section" in msg:
+                            self.download_progress.update(self.download_progress.progress['value'], msg.strip())
+                        elif " KB of " in msg:
+                            # 10 KB of 40 KB
+                            match = re.search(r'(\d+) KB of (\d+) KB', msg)
+                            if match:
+                                sent = int(match.group(1))
+                                total = int(match.group(2))
+                                if total > 0:
+                                    percent = (sent * 100) // total
+                                    self.download_progress.update(percent)
                     if hasattr(self, 'collecting_functions') and self.collecting_functions:
                         self._process_console_for_functions(data[0])
                     if "unknown architecture \"arm\"" in data[0]:
@@ -915,6 +928,22 @@ class OzonePy(tk.Tk):
                     self.log(f"LOG: {data[0]}")
                     if "unknown architecture \"arm\"" in data[0]:
                         self._show_arch_warning()
+                elif resp_type == 'status-async':
+                    # e.g., download,section=".text",section-size="1000",total-size="2000",total-sent="1000"
+                    if data[0].startswith("download"):
+                        payload = data[0]
+                        section_match = re.search(r'section="([^"]+)"', payload)
+                        total_size_match = re.search(r'total-size="(\d+)"', payload)
+                        total_sent_match = re.search(r'total-sent="(\d+)"', payload)
+                        
+                        if total_size_match and total_sent_match:
+                            total = int(total_size_match.group(1))
+                            sent = int(total_sent_match.group(1))
+                            if total > 0:
+                                percent = (sent * 100) // total
+                                section = section_match.group(1) if section_match else "unknown"
+                                if hasattr(self, 'download_progress') and self.download_progress:
+                                    self.download_progress.update(percent, f"Downloading section {section} ({percent}%)")
                 elif resp_type == 'exec-async':
                     # data[0] could be e.g. stopped,reason="breakpoint-hit",...
                     if data[0].startswith("thread-created"):
@@ -2213,7 +2242,22 @@ class OzonePy(tk.Tk):
         self.reset_target(run_to_main=True)
 
     def download(self):
-        self.gdb.send_command("load")
+        if hasattr(self, 'download_progress') and self.download_progress:
+            self.download_progress.close()
+        
+        self.download_progress = ConnectionProgress(self, "Downloading ELF")
+        self.download_progress.update(0, "Starting download...")
+        
+        def on_download_complete(result_class, rest):
+            if hasattr(self, 'download_progress') and self.download_progress:
+                self.download_progress.close()
+                self.download_progress = None
+            if result_class == "^done":
+                self.log("Download complete.")
+            else:
+                self.log(f"Download failed: {rest}")
+
+        self.gdb.send_command("load", on_download_complete)
         self.log("Downloading ELF to target...")
 
     def go(self):

@@ -213,8 +213,15 @@ class GdbBackend:
                 if not line_stripped:
                     continue
 
+                # EXHAUSTIVE LOGGING: Log everything to a file for diagnosis
+                try:
+                    with open("gdb_raw_log.txt", "a") as f:
+                        f.write(line)
+                except:
+                    pass
+
                 # Log everything for debugging
-                if "stack-list-frames" in line_stripped or "frame=" in line_stripped or "stopped" in line_stripped:
+                if any(x in line_stripped for x in ["stack-list-frames", "frame=", "stopped", "download"]):
                     self.response_queue.put(('mi-recv-debug', line_stripped))
 
                 self.response_queue.put(('mi-recv', line_stripped))

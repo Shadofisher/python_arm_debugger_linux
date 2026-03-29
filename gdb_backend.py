@@ -247,9 +247,27 @@ class GdbBackend:
                     elif record_type == '=':
                         self.response_queue.put(('notify-async', full_payload))
                 elif line.startswith('~'):
-                    self.response_queue.put(('console', line[1:-1] if line.endswith('"') else line[1:]))
+                    # console-stream-output: ~"string"
+                    content = line[1:].strip()
+                    if content.startswith('"') and content.endswith('"'):
+                        content = content[1:-1]
+                    # Unescape \" \n \t
+                    content = content.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                    self.response_queue.put(('console', content))
                 elif line.startswith('&'):
-                    self.response_queue.put(('log', line[1:-1] if line.endswith('"') else line[1:]))
+                    # log-stream-output: &"string"
+                    content = line[1:].strip()
+                    if content.startswith('"') and content.endswith('"'):
+                        content = content[1:-1]
+                    content = content.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                    self.response_queue.put(('log', content))
+                elif line.startswith('@'):
+                    # target-stream-output: @"string"
+                    content = line[1:].strip()
+                    if content.startswith('"') and content.endswith('"'):
+                        content = content[1:-1]
+                    content = content.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                    self.response_queue.put(('target', content))
                 elif line == '(gdb)':
                     pass # Prompt
                 else:

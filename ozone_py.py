@@ -203,6 +203,13 @@ class OzonePy(tk.Tk):
         self.color_breakpoint = tk.StringVar(value="#ffcccc") # Light red
         self.color_current_line = tk.StringVar(value="#add8e6") # Light blue
         self.show_inline_vars = tk.BooleanVar(value=True)
+        self.coverage_enabled = tk.BooleanVar(value=False)
+        self.all_functions = [] # List of strings: ["func1", "func2", ...]
+        self.hit_functions = {} # Dict: {"func1": hit_count, "func2": hit_count, ...}
+        self.enabled_functions = {} # Dict: {"func1": True, "func2": False, ...}
+        self.global_coverage_all_checked = tk.BooleanVar(value=True)
+        self.overall_coverage_pct = tk.DoubleVar(value=0.0)
+        self._coverage_update_pending = False
 
         # Recent files
         self.recent_files = []
@@ -314,6 +321,7 @@ class OzonePy(tk.Tk):
         file_menu.add_command(label="Color Settings...", command=self.set_colors)
         file_menu.add_command(label="Show Debug Log", command=self.show_debug_log)
 
+        file_menu.add_checkbutton(label="Enable Code Coverage", variable=self.coverage_enabled, command=self._on_toggle_coverage)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -410,33 +418,41 @@ class OzonePy(tk.Tk):
         source_container = ttk.Frame(self.upper_pw)
         self.upper_pw.add(source_container, weight=3)
 
-        self.line_numbers = tk.Text(source_container, width=4, padx=4, takefocus=0, border=0,
-                                   background='#e0e0e0', state='disabled', wrap='none', font=('Consolas', 10))
+        self.line_numbers = tk.Text(source_container, width=4, padx=5, pady=5, takefocus=0, border=0,
+                                   highlightthickness=0, background='#e0e0e0', state='disabled', wrap='none',
+                                   font=('Consolas', 10), spacing1=0, spacing2=0, spacing3=0)
         self.line_numbers.pack(side=tk.LEFT, fill=tk.Y)
 
         self.source_text = tk.Text(source_container, wrap=tk.NONE, undo=False,
                                    foreground=self.color_code_fg.get(), background=self.color_code_bg.get(),
-                                   font=('Consolas', 10), borderwidth=0, padx=5)
+                                   font=('Consolas', 10), borderwidth=0, highlightthickness=0, padx=5, pady=5,
+                                   spacing1=0, spacing2=0, spacing3=0)
         self.source_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.source_text.tag_configure("breakpoint", background=self.color_breakpoint.get())
-        self.source_text.tag_configure("hit_breakpoint", background=self.color_current_line.get())
-        self.source_text.tag_configure("current_line", background=self.color_current_line.get(), foreground="black")
-        self.source_text.tag_configure("comment", foreground=self.color_comments.get())
-        self.source_text.tag_configure("inline_var", foreground="gray", font=("Consolas", 10, "italic"))
+        self.source_text.tag_configure("breakpoint", background=self.color_breakpoint.get(), spacing1=0, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("hit_breakpoint", background=self.color_current_line.get(), spacing1=0, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("comment", foreground=self.color_comments.get(), spacing1=0, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("inline_var", foreground="gray", font=("Consolas", 10, "italic"), spacing1=0, spacing2=0, spacing3=0)
 
-        self.line_numbers.tag_configure("breakpoint", background=self.color_breakpoint.get(), foreground="black")
-        self.line_numbers.tag_configure("hit_breakpoint", background=self.color_current_line.get(), foreground="black")
-        self.line_numbers.tag_configure("current_line", background=self.color_current_line.get(), foreground="black")
+        self.line_numbers.tag_configure("breakpoint", background=self.color_breakpoint.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("hit_breakpoint", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("inline_var_padding", font=("Consolas", 10, "italic"), spacing1=0, spacing2=0, spacing3=0)
 
-        src_scroll = ttk.Scrollbar(source_container, command=self._on_scroll)
-        src_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.source_text.config(yscrollcommand=src_scroll.set)
-        self.line_numbers.config(yscrollcommand=src_scroll.set)
+        self.src_scroll = ttk.Scrollbar(source_container, command=self._on_scroll)
+        self.src_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.source_text.config(yscrollcommand=self._on_source_scroll_update)
+        self.line_numbers.config(yscrollcommand=self.src_scroll.set)
 
         self.line_numbers.bind("<Button-1>", self._on_line_click)
+        self.line_numbers.bind("<Button-3>", self._on_line_right_click)
         self.source_text.bind("<MouseWheel>", self._on_mousewheel)
         self.line_numbers.bind("<MouseWheel>", self._on_mousewheel)
+        self.source_text.bind("<Button-4>", self._on_mousewheel)
+        self.source_text.bind("<Button-5>", self._on_mousewheel)
+        self.line_numbers.bind("<Button-4>", self._on_mousewheel)
+        self.line_numbers.bind("<Button-5>", self._on_mousewheel)
         self.source_text.bind("<Motion>", self._on_source_hover)
         self.source_text.bind("<Leave>", self._hide_tooltip)
         self.tooltip = None
@@ -474,6 +490,10 @@ class OzonePy(tk.Tk):
         self.bp_tree.pack(fill=tk.BOTH, expand=True)
         self.bp_tree.bind("<Button-3>", self._on_bp_right_click)
 
+        bp_ctrl_frame = ttk.Frame(bp_frame)
+        bp_ctrl_frame.pack(fill=tk.X)
+        ttk.Button(bp_ctrl_frame, text="Add Watchpoint", command=self.add_watchpoint).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         # Watch tab
         watch_frame = ttk.Frame(self.sidebar_tabs)
         self.sidebar_tabs.add(watch_frame, text="Watches")
@@ -485,7 +505,7 @@ class OzonePy(tk.Tk):
         self.watch_tree.bind("<Double-1>", self._on_watch_double_click)
         self.watch_tree.bind("<<TreeviewOpen>>", self._on_watch_expand)
         self.watch_tree.tag_configure('changed', background='lightblue')
-        ttk.Button(watch_frame, text="Add Watch", command=self.add_watch).pack(fill=tk.X)
+        ttk.Button(watch_frame, text="Add Watch / Expression", command=self.add_watch).pack(fill=tk.X)
 
         # Live Watch tab
         live_watch_frame = ttk.Frame(self.sidebar_tabs)
@@ -498,7 +518,7 @@ class OzonePy(tk.Tk):
         self.live_watch_tree.bind("<Double-1>", self._on_live_watch_double_click)
         self.live_watch_tree.bind("<<TreeviewOpen>>", self._on_watch_expand)
         self.live_watch_tree.tag_configure('changed', background='lightgreen')
-        
+
         # Status Label at the bottom of the Live Watch window
         self.live_watch_status = ttk.Label(live_watch_frame, text="Live Watch: Idle", style='Status.TLabel')
         self.live_watch_status.pack(side=tk.BOTTOM, fill=tk.X)
@@ -510,6 +530,42 @@ class OzonePy(tk.Tk):
         rate_entry = ttk.Entry(live_ctrl_frame, textvariable=self.live_watch_update_interval, width=6)
         rate_entry.pack(side=tk.LEFT, padx=2)
 
+        # Coverage tab
+        coverage_frame = ttk.Frame(self.sidebar_tabs)
+        self.sidebar_tabs.add(coverage_frame, text="Coverage")
+
+        # Summary Area
+        coverage_summary_frame = ttk.Frame(coverage_frame)
+        coverage_summary_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        # Checkbox to toggle all functions at once
+        self.global_toggle_cb = ttk.Checkbutton(coverage_summary_frame, variable=self.global_coverage_all_checked, command=self._on_global_toggle_all)
+        self.global_toggle_cb.pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Label(coverage_summary_frame, text="Overall Code Coverage:", font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT)
+        self.coverage_pct_label = ttk.Label(coverage_summary_frame, text="0.0%", font=('Segoe UI', 10, 'bold'), foreground="blue")
+        self.coverage_pct_label.pack(side=tk.LEFT, padx=5)
+
+        # Functions List
+        coverage_list_frame = ttk.Frame(coverage_frame)
+        coverage_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        ttk.Label(coverage_list_frame, text="Functions:").pack(anchor=tk.W)
+
+        # We'll use the #0 (tree) column as our checkbox column.
+        self.coverage_tree = ttk.Treeview(coverage_list_frame, columns=("hits",), show="tree headings")
+        self.coverage_tree.heading("#0", text="[X] Function")
+        self.coverage_tree.heading("hits", text="Hits")
+        self.coverage_tree.column("#0", width=150)
+        self.coverage_tree.column("hits", width=50, anchor=tk.CENTER)
+        self.coverage_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.coverage_tree.bind("<Button-1>", self._on_tree_click)
+
+        coverage_scroll = ttk.Scrollbar(coverage_list_frame, orient="vertical", command=self.coverage_tree.yview)
+        coverage_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.coverage_tree.configure(yscrollcommand=coverage_scroll.set)
+
+        ttk.Button(coverage_frame, text="Reset Coverage", command=self._reset_coverage).pack(fill=tk.X, padx=5, pady=2)
+
         # Registers tab
         reg_frame = ttk.Frame(self.sidebar_tabs)
         self.sidebar_tabs.add(reg_frame, text="Registers")
@@ -517,6 +573,7 @@ class OzonePy(tk.Tk):
         self.reg_tree.heading("#0", text="Register")
         self.reg_tree.heading("value", text="Value")
         self.reg_tree.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(reg_frame, text="Export Registers", command=self.export_registers).pack(fill=tk.X, padx=5, pady=2)
 
         # Call Stack tab
         stack_frame = ttk.Frame(self.sidebar_tabs)
@@ -533,6 +590,23 @@ class OzonePy(tk.Tk):
         self.stack_tree.pack(fill=tk.BOTH, expand=True)
         self.stack_tree.bind("<Double-1>", self._on_stack_frame_double_click)
 
+        # Threads tab
+        threads_frame = ttk.Frame(self.sidebar_tabs)
+        self.sidebar_tabs.add(threads_frame, text="Threads")
+        self.threads_tree = ttk.Treeview(threads_frame, columns=("id", "target-id", "name", "state", "frame"), show="headings")
+        self.threads_tree.heading("id", text="ID")
+        self.threads_tree.heading("target-id", text="Target ID")
+        self.threads_tree.heading("name", text="Name")
+        self.threads_tree.heading("state", text="State")
+        self.threads_tree.heading("frame", text="Frame")
+        self.threads_tree.column("id", width=30, anchor=tk.CENTER)
+        self.threads_tree.column("target-id", width=100)
+        self.threads_tree.column("name", width=100)
+        self.threads_tree.column("state", width=70)
+        self.threads_tree.column("frame", width=200)
+        self.threads_tree.pack(fill=tk.BOTH, expand=True)
+        self.threads_tree.bind("<Double-1>", self._on_thread_double_click)
+
         # Memory tab
         mem_frame = ttk.Frame(self.sidebar_tabs)
         self.sidebar_tabs.add(mem_frame, text="Memory")
@@ -543,11 +617,14 @@ class OzonePy(tk.Tk):
         self.mem_addr_entry.pack(side=tk.LEFT, padx=2)
         self.mem_addr_entry.insert(0, "0x20000000")
         ttk.Button(mem_ctrl_frame, text="Read", width=5, command=self.read_memory).pack(side=tk.LEFT)
+        ttk.Button(mem_ctrl_frame, text="Export", width=6, command=self.export_memory).pack(side=tk.LEFT)
+        ttk.Button(mem_ctrl_frame, text="Plot", width=5, command=self.show_memory_plotter).pack(side=tk.LEFT)
         self.mem_text = tk.Text(mem_frame, font=("Consolas", 10), wrap=tk.NONE)
         self.mem_text.pack(fill=tk.BOTH, expand=True)
 
         # Context Menus
         self.bp_menu = tk.Menu(self, tearoff=0)
+        self.bp_menu.add_command(label="Breakpoint Properties...", command=self._show_selected_bp_properties)
         self.bp_menu.add_command(label="Delete Breakpoint", command=self.delete_selected_breakpoint)
         self.bp_menu.add_separator()
         self.bp_menu.add_command(label="Delete All Breakpoints", command=self.delete_all_breakpoints)
@@ -555,6 +632,8 @@ class OzonePy(tk.Tk):
         self.source_menu = tk.Menu(self, tearoff=0)
         self.source_menu.add_command(label="Add to Watch", command=self._add_selection_to_watch)
         self.source_menu.add_command(label="Add to Live Watch", command=self._add_selection_to_live_watch)
+        self.source_menu.add_separator()
+        self.source_menu.add_command(label="Run to Cursor", command=self.run_to_cursor)
         self.source_text.bind("<Button-3>", self._on_source_right_click)
 
         self.watch_menu = tk.Menu(self, tearoff=0)
@@ -586,6 +665,16 @@ class OzonePy(tk.Tk):
         self.bind("<F9>", lambda e: self.stop_debug())
         self.bind("<F7>", lambda e: self.step())
         self.bind("<F8>", lambda e: self.step_over())
+
+    def _show_selected_bp_properties(self):
+        selected_item = self.bp_tree.selection()
+        if not selected_item:
+            return
+
+        idx = self.bp_tree.index(selected_item[0])
+        if 0 <= idx < len(self.breakpoints):
+            bp = self.breakpoints[idx]
+            self._show_breakpoint_properties(bp)
 
     def _update_ui_for_execution_state(self, running):
         self.is_running = running
@@ -725,7 +814,7 @@ class OzonePy(tk.Tk):
                     # Always refresh UI if we got a ^done, to clear old highlights if needed
                     self._refresh_live_watch_tree_values()
                     self.update_idletasks() # Refresh UI
-                    
+
                     end_time = time.time()
                     elapsed = (end_time - start_time) * 1000
                     try:
@@ -818,6 +907,8 @@ class OzonePy(tk.Tk):
                 resp_type, *data = resp
                 if resp_type == 'console':
                     self.log(data[0])
+                    if hasattr(self, 'collecting_functions') and self.collecting_functions:
+                        self._process_console_for_functions(data[0])
                     if "unknown architecture \"arm\"" in data[0]:
                         self._show_arch_warning()
                 elif resp_type == 'log':
@@ -825,9 +916,20 @@ class OzonePy(tk.Tk):
                     if "unknown architecture \"arm\"" in data[0]:
                         self._show_arch_warning()
                 elif resp_type == 'exec-async':
+                    # data[0] could be e.g. stopped,reason="breakpoint-hit",...
+                    if data[0].startswith("thread-created"):
+                        self._update_threads()
+                    elif data[0].startswith("thread-exited"):
+                        self._update_threads()
+                    elif data[0].startswith("thread-selected"):
+                        self._update_threads()
                     self._handle_exec_async(data[0])
                 elif resp_type == 'result':
                     # data = (token, result_class, rest)
+                    if data[1] == "^done":
+                        if hasattr(self, 'collecting_functions') and self.collecting_functions:
+                            self.collecting_functions = False
+                            self.debug_log("Finished collecting functions for coverage.")
                     if data[1] == "^connected":
                         self.target_connected = True
                         if hasattr(self, 'status_bar') and self.status_bar.winfo_exists():
@@ -861,19 +963,46 @@ class OzonePy(tk.Tk):
             fullname = None
             line = None
             is_bp_hit = 'reason="breakpoint-hit"' in data
+            is_watchpoint_hit = 'reason="watchpoint-trigger"' in data or 'reason="access-watchpoint-trigger"' in data or 'reason="read-watchpoint-trigger"' in data
             is_interrupted = 'reason="signal-received"' in data or 'reason="interrupted"' in data
 
-            if is_interrupted or is_bp_hit:
+            if is_interrupted or is_bp_hit or is_watchpoint_hit:
                 if is_interrupted:
                     self.log("Execution interrupted.")
+                elif is_watchpoint_hit:
+                    self.log("Watchpoint hit.")
                 else:
                     self.log("Breakpoint hit.")
-                # Switch to Call Stack tab
-                if hasattr(self, "sidebar_tabs"):
-                    for i in range(self.sidebar_tabs.index("end")):
-                        if self.sidebar_tabs.tab(i, "text") == "Call Stack":
-                            self.sidebar_tabs.select(i)
-                            break
+                    # Handle breakpoint dependencies
+                    bp_num_match = re.search(r'bkptno="(\d+)"', data)
+                    if bp_num_match:
+                        hit_num = bp_num_match.group(1)
+                        # Mark it as satisfied
+                        for bp in self.breakpoints:
+                            if bp['number'] == hit_num:
+                                bp['is_satisfied'] = True
+                                break
+                        
+                        # Now check if any other breakpoints can be enabled
+                        for bp in self.breakpoints:
+                            deps = bp.get('depends_on', [])
+                            if deps:
+                                # A breakpoint is satisfied if all its dependencies are satisfied
+                                all_satisfied = True
+                                for dep_num in deps:
+                                    dep_satisfied = False
+                                    for other_bp in self.breakpoints:
+                                        if other_bp['number'] == dep_num and other_bp.get('is_satisfied'):
+                                            dep_satisfied = True
+                                            break
+                                    if not dep_satisfied:
+                                        all_satisfied = True # Wait, no! If one dep is not satisfied, all_satisfied is false
+                                        all_satisfied = False
+                                        break
+                                
+                                if all_satisfied:
+                                    self.log(f"Dependencies met for breakpoint {bp['number']}, enabling.")
+                                    self.gdb.send_command(f"-break-enable {bp['number']}")
             match = re.search(r'fullname="([^"]+)"', data)
             if match:
                 fullname = match.group(1).replace(r'\\', '\\')
@@ -919,7 +1048,7 @@ class OzonePy(tk.Tk):
                             self.location_bar.config(text=f"Stopped at line: {l_num} in {f_func}")
                             if self.current_source:
                                 self._update_source_view(self.current_source, l_num, is_hit=is_bp_hit)
-                        self.update() # Force refresh
+                        self.update_idletasks() # Force refresh
 
                 # Check if we should request frame info. Avoid requesting if we are likely in a transient state.
                 if data.startswith("stopped"):
@@ -928,15 +1057,21 @@ class OzonePy(tk.Tk):
             self._update_watches()
             self._update_live_watches_for_step()
             self._update_registers()
+            self._update_threads()
             self.debug_log("DEBUG: Triggering Call Stack update from _handle_exec_async", "debug")
             self._update_call_stack()
             self._update_inline_variables()
             self.read_memory()
+            if self.coverage_enabled.get():
+                if func_name != "unknown":
+                    self._update_coverage_stats(func_name)
+                else:
+                    # If func_name is unknown, try to get it from PC if possible
+                    self._update_on_the_fly_coverage()
         elif data.startswith("running"):
             self._update_ui_for_execution_state(True)
             self.location_bar.config(text="Running...")
-
-        self.update() # Force refresh after handling async event
+            self.update_idletasks() # Force refresh after handling async event
 
     def load_elf(self):
         path = filedialog.askopenfilename(filetypes=[("ELF files", "*.elf"), ("All files", "*.*")])
@@ -953,6 +1088,8 @@ class OzonePy(tk.Tk):
                 self.log(f"Loaded ELF: {path}")
                 self._request_source_files()
                 self._add_to_recent_files(path)
+                if self.coverage_enabled.get():
+                    self._get_all_functions()
             else:
                 self.log(f"Failed to load ELF: {rest}", "error")
 
@@ -1397,7 +1534,7 @@ class OzonePy(tk.Tk):
                     pass
 
                 # Version 7.11.0 is very picky. Some versions exit on port probes.
-                # However, the user's setup seems to require the probe to succeed or 
+                # However, the user's setup seems to require the probe to succeed or
                 # at least the server to stay alive.
                 # If we've seen the "Waiting" message, we consider it ready.
                 output = "\n".join(getattr(self.stlink_process, 'stdout_buffer', []))
@@ -1870,6 +2007,10 @@ class OzonePy(tk.Tk):
 
                     progress.update(90, "Finalizing connection...")
 
+                    if self.coverage_enabled.get():
+                        self._get_all_functions()
+                        self._start_coverage_timer()
+
                     if post_connect_cmd:
                         self.debug_log(f"Sending post-connection command: {post_connect_cmd}", "info")
                         if post_connect_cmd == "monitor reset halt":
@@ -1972,6 +2113,12 @@ class OzonePy(tk.Tk):
             self.log("Not connected to target. Connect first.")
             return
 
+        # Reset dependency status when resetting target
+        for bp in self.breakpoints:
+            bp['is_satisfied'] = False
+            if bp.get('depends_on'):
+                self.gdb.send_command(f"-break-disable {bp['number']}")
+
         self.log(f"Resetting processor (attempts remaining: {retry_count}, command: '{reset_cmd}')...")
 
         def on_reset(result_class, rest):
@@ -1988,7 +2135,7 @@ class OzonePy(tk.Tk):
                             next_cmd = "monitor reset init"
                         elif reset_cmd == "monitor reset init":
                             next_cmd = "kill"
-                        
+
                         if next_cmd:
                             self.log(f"Command '{reset_cmd}' failed or not supported. Trying '{next_cmd}'...")
                             self.after(200, lambda: self.reset_target(retry_count, run_to_main, next_cmd))
@@ -2024,7 +2171,7 @@ class OzonePy(tk.Tk):
                     self.log("Symbol table is missing. Attempting to reload ELF...")
                     # Normalize for GDB MI
                     gdb_path = self.elf_path.replace('\\', '/')
-                    
+
                     def on_reload(rel_result_class, rel_rest):
                         if rel_result_class == "^done":
                             self.log(f"Reloaded ELF: {self.elf_path}. Retrying breakpoint at main.")
@@ -2032,7 +2179,7 @@ class OzonePy(tk.Tk):
                         else:
                             self.log(f"Failed to reload ELF: {rel_rest}", "error")
                             self._handle_exec_async("stopped")
-                    
+
                     self.gdb.send_command(f'-file-exec-and-symbols "{gdb_path}"', on_reload)
                 else:
                     self.log(f"Failed to set breakpoint at main: {rest}")
@@ -2058,7 +2205,7 @@ class OzonePy(tk.Tk):
         if not self.target_connected:
             self.log("Not connected to target. Connect first.")
             return
-        
+
         # We explicitly request to run to main after reset
         # Some targets need a bit of time or a specific sequence
         # Try a more forceful reset sequence if needed
@@ -2099,19 +2246,6 @@ class OzonePy(tk.Tk):
 
         self.log("Interrupting execution...")
         self.debug_log("Pause requested", "info")
-        
-        # Requirement: "When pressing pause the call stack sould be shown in its own dropdown"
-        # Since we use tabs, we switch to the Call Stack tab.
-        # It will be updated when GDB confirms it stopped.
-        if hasattr(self, "sidebar_tabs"):
-            try:
-                # Find index of Call Stack tab
-                for i in range(self.sidebar_tabs.index("end")):
-                    if self.sidebar_tabs.tab(i, "text") == "Call Stack":
-                        self.sidebar_tabs.select(i)
-                        break
-            except Exception as e:
-                self.debug_log(f"Error switching to Call Stack tab: {e}")
 
         # Primary method: -exec-interrupt
         if self.gdb.halt():
@@ -2126,7 +2260,7 @@ class OzonePy(tk.Tk):
             # But just in case, let's also update the status bar to show we are waiting.
             self.location_bar.config(text="Interrupting...")
             self.update() # Force UI update to show the new status immediately
-            
+
             # Update call stack while waiting (it will fetch the last known state)
             self._update_call_stack()
 
@@ -2135,7 +2269,7 @@ class OzonePy(tk.Tk):
                 if self.target_connected and self.is_running:
                     self.debug_log("Target still running after 1s, trying signals", "warning")
                     self.gdb._send_interrupt_signals()
-            
+
             self.after(1000, check_if_stopped)
         else:
             self.log("Failed to send interrupt signal.")
@@ -2186,8 +2320,9 @@ class OzonePy(tk.Tk):
 
     def _on_mousewheel(self, event):
         # On Windows, event.delta is typically +/- 120
+        # On Linux/macOS, it might vary.
         # Scroll both widgets
-        move = -1 if event.delta > 0 else 1
+        move = -1 if (event.delta > 0 or (hasattr(event, 'num') and event.num == 4)) else 1
         self.source_text.yview_scroll(move, "units")
         self.line_numbers.yview_scroll(move, "units")
         return "break" # Prevent default behavior
@@ -2195,6 +2330,13 @@ class OzonePy(tk.Tk):
     def _on_scroll(self, *args):
         self.source_text.yview(*args)
         self.line_numbers.yview(*args)
+        # Ensure they are perfectly in sync by forcing the same yview
+        self.line_numbers.yview_moveto(self.source_text.yview()[0])
+
+    def _on_source_scroll_update(self, *args):
+        self.line_numbers.yview_moveto(args[0])
+        if hasattr(self, 'src_scroll'):
+            self.src_scroll.set(*args)
 
     def _on_line_click(self, event):
         # Toggle breakpoint on click
@@ -2229,7 +2371,15 @@ class OzonePy(tk.Tk):
                 if result_class == "^done":
                     match = re.search(r'number="(\d+)"', rest)
                     if match:
-                        self.breakpoints.append({'number': match.group(1), 'file': filename, 'line': line})
+                        self.breakpoints.append({
+                            'number': match.group(1), 
+                            'file': filename, 
+                            'line': line,
+                            'count': 0,
+                            'condition': '',
+                            'depends_on': [],
+                            'is_satisfied': False
+                        })
                         self._refresh_bp_tree()
                         self._refresh_source_tags()
 
@@ -2239,6 +2389,142 @@ class OzonePy(tk.Tk):
         else:
             self._refresh_bp_tree()
             self._refresh_source_tags()
+
+    def _on_line_right_click(self, event):
+        # Determine which line was right-clicked
+        line_idx = self.line_numbers.index(f"@{event.x},{event.y}").split('.')[0]
+        line = int(line_idx)
+        
+        # Check if there is a breakpoint on this line
+        target_bp = None
+        if self.current_source:
+            filename = os.path.abspath(os.path.normpath(self.current_source))
+            for bp in self.breakpoints:
+                if os.path.abspath(os.path.normpath(bp['file'])) == filename and bp['line'] == line:
+                    target_bp = bp
+                    break
+        
+        if target_bp:
+            self._show_breakpoint_properties(target_bp)
+        else:
+            # Maybe show a menu to add a breakpoint? 
+            # For now, let's just ignore if there's no breakpoint there.
+            pass
+
+    def _show_breakpoint_properties(self, bp):
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Breakpoint Properties - {os.path.basename(bp['file'])}:{bp['line']}")
+        dialog.geometry("400x450")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        main_frame = ttk.Frame(dialog, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 1 & 2: List of all breakpoints with checkboxes
+        ttk.Label(main_frame, text="Breakpoints List (Check to set as dependency):").pack(anchor=tk.W)
+        
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        canvas = tk.Canvas(list_frame, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Track which breakpoints are selected as dependencies
+        # In a real GDB scenario, "happening before" could mean many things.
+        # We'll interpret it as a requirement: break only if the dependency was hit.
+        # However, GDB doesn't have a simple way to do this without scripts.
+        # We will just store it in the BP data for now as requested.
+        
+        dep_vars = {}
+        current_deps = bp.get('depends_on', [])
+
+        for other_bp in self.breakpoints:
+            if other_bp['number'] == bp['number']:
+                continue
+            
+            var = tk.BooleanVar(value=(other_bp['number'] in current_deps))
+            dep_vars[other_bp['number']] = var
+            
+            text = f"BP {other_bp['number']}: {os.path.basename(other_bp['file'])}:{other_bp['line']}"
+            cb = ttk.Checkbutton(scrollable_frame, text=text, variable=var)
+            cb.pack(anchor=tk.W, padx=5, pady=2)
+
+        # 4: Count that determines how many times it should be hit
+        count_frame = ttk.Frame(main_frame)
+        count_frame.pack(fill=tk.X, pady=10)
+        ttk.Label(count_frame, text="Count (1: stop on 1st hit, 5: stop on 5th hit, 0: always stop):").pack(side=tk.LEFT)
+        
+        hit_count_var = tk.StringVar(value=str(bp.get('count', 0)))
+        count_entry = ttk.Entry(count_frame, textvariable=hit_count_var, width=10)
+        count_entry.pack(side=tk.LEFT, padx=5)
+
+        # Condition entry (Extra feature, usually goes with conditional BPs)
+        cond_frame = ttk.Frame(main_frame)
+        cond_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(cond_frame, text="Condition (GDB expr):").pack(side=tk.LEFT)
+        cond_var = tk.StringVar(value=bp.get('condition', ''))
+        cond_entry = ttk.Entry(cond_frame, textvariable=cond_var)
+        cond_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        def save_and_close():
+            try:
+                new_count = int(hit_count_var.get())
+            except ValueError:
+                new_count = 0
+            
+            new_deps = [num for num, var in dep_vars.items() if var.get()]
+            new_condition = cond_var.get().strip()
+            
+            bp['count'] = new_count
+            bp['depends_on'] = new_deps
+            bp['condition'] = new_condition
+            
+            # Apply to GDB
+            # 1. Count (GDB's ignore count is count-1)
+            # If count is 5, we ignore 4 times and stop on the 5th.
+            # If count is 1, we ignore 0 times and stop on the 1st.
+            # If count is 0, we ignore 0 times and stop on the 1st (always stop).
+            gdb_ignore_count = max(0, new_count - 1) if new_count > 0 else 0
+            self.gdb.send_command(f"-break-after {bp['number']} {gdb_ignore_count}")
+            
+            # 2. Condition
+            if new_condition:
+                self.gdb.send_command(f"-break-condition {bp['number']} {new_condition}")
+            else:
+                # To clear condition in GDB MI, you usually send empty condition? 
+                # Actually -break-condition <number> without expression might work or error.
+                # Usually one might use a condition that's always true, or use the CLI command.
+                self.gdb.send_command(f"condition {bp['number']}") # CLI command to clear
+            
+            # 3. Dependencies - this is tricky in GDB. 
+            # We'll just log it for now as a "mock" implementation of the UI requirement.
+            if new_deps:
+                self.log(f"Breakpoint {bp['number']} now depends on {new_deps}")
+                # When dependencies are set, we disable the breakpoint initially
+                self.gdb.send_command(f"-break-disable {bp['number']}")
+            else:
+                # If no dependencies, make sure it's enabled
+                self.gdb.send_command(f"-break-enable {bp['number']}")
+            
+            dialog.destroy()
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        ttk.Button(btn_frame, text="Save", command=save_and_close).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
 
     def _on_bp_right_click(self, event):
         item = self.bp_tree.identify_row(event.y)
@@ -2273,18 +2559,133 @@ class OzonePy(tk.Tk):
         for item in self.bp_tree.get_children():
             self.bp_tree.delete(item)
         for bp in self.breakpoints:
-            self.bp_tree.insert("", tk.END, values=(os.path.basename(bp['file']), bp['line']))
+            info = []
+            if bp.get('count', 0) > 0:
+                info.append(f"count: {bp['count']}")
+            if bp.get('condition'):
+                info.append(f"cond: {bp['condition']}")
+            if bp.get('depends_on'):
+                info.append(f"deps: {len(bp['depends_on'])}")
+            
+            if bp.get('type') == 'watchpoint':
+                val = f"Watch: {bp.get('expression', '?')}"
+                line = "-"
+            else:
+                val = os.path.basename(bp['file'])
+                line = bp['line']
+
+            if info:
+                val += f" ({', '.join(info)})"
+            
+            self.bp_tree.insert("", tk.END, values=(val, line))
 
     def _refresh_source_tags(self):
         self.source_text.tag_remove("breakpoint", "1.0", tk.END)
         self.line_numbers.tag_remove("breakpoint", "1.0", tk.END)
+        self.source_text.tag_remove("hit_breakpoint", "1.0", tk.END)
+        self.line_numbers.tag_remove("hit_breakpoint", "1.0", tk.END)
+        self.source_text.tag_remove("current_line", "1.0", tk.END)
+        self.line_numbers.tag_remove("current_line", "1.0", tk.END)
+
+        # Normalize once
+        cur_src = os.path.abspath(os.path.normpath(self.current_source)) if self.current_source else None
+
+        # Add current line tag first (if it's the current file)
+        if cur_src and self.current_line > 0:
+            # We don't know yet if it's hit_breakpoint or current_line,
+            # we'll decide that based on breakpoints in the next loop.
+            pass
+
+        # Manage breakpoints and current line highlights
         for bp in self.breakpoints:
-            if bp['file'] == self.current_source:
-                self.source_text.tag_add("breakpoint", f"{bp['line']}.0", f"{bp['line']}.end")
-                self.line_numbers.tag_add("breakpoint", f"{bp['line']}.0", f"{bp['line']}.end")
+            bp_file = os.path.abspath(os.path.normpath(bp['file']))
+            if bp_file == cur_src:
+                # Is this line also the current execution line?
+                is_hit = (bp['line'] == self.current_line)
+                tag_name = "hit_breakpoint" if is_hit else "breakpoint"
+                self.source_text.tag_add(tag_name, f"{bp['line']}.0", f"{bp['line']}.end")
+                self.line_numbers.tag_add(tag_name, f"{bp['line']}.0", f"{bp['line']}.end")
+                # Add italic padding to line numbers if current line has italic inline vars to keep heights matched
+                if self.show_inline_vars.get():
+                    self.line_numbers.tag_add("inline_var_padding", f"{bp['line']}.0", f"{bp['line']}.end")
+
+        # Finally, if there's a current line that was not marked as hit_breakpoint
+        if cur_src and self.current_line > 0:
+            # Check if it was already tagged as hit_breakpoint
+            tags = self.source_text.tag_names(f"{self.current_line}.0")
+            if "hit_breakpoint" not in tags:
+                self.source_text.tag_add("current_line", f"{self.current_line}.0", f"{self.current_line}.end")
+                self.line_numbers.tag_add("current_line", f"{self.current_line}.0", f"{self.current_line}.end")
+                if self.show_inline_vars.get():
+                    self.line_numbers.tag_add("inline_var_padding", f"{self.current_line}.0", f"{self.current_line}.end")
+
+    def add_watchpoint(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Add Watchpoint")
+        dialog.geometry("300x150")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Expression:").pack(padx=5, pady=5)
+        expr_entry = ttk.Entry(dialog)
+        expr_entry.pack(fill=tk.X, padx=5)
+        
+        type_var = tk.StringVar(value="write")
+        ttk.Radiobutton(dialog, text="Write", variable=type_var, value="write").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(dialog, text="Read", variable=type_var, value="read").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(dialog, text="Access (R/W)", variable=type_var, value="access").pack(side=tk.LEFT, padx=5)
+
+        def add():
+            expr = expr_entry.get().strip()
+            if not expr: return
+            
+            mode = type_var.get()
+            flag = ""
+            if mode == "read": flag = "-r"
+            elif mode == "access": flag = "-a"
+            
+            def callback(result_class, rest):
+                if result_class == "^done":
+                    match = re.search(r'number="(\d+)"', rest)
+                    if match:
+                        self.breakpoints.append({
+                            'number': match.group(1),
+                            'type': 'watchpoint',
+                            'expression': expr,
+                            'mode': mode,
+                            'file': '', # Not file based
+                            'line': 0
+                        })
+                        self._refresh_bp_tree()
+                else:
+                    self.log(f"Failed to set watchpoint: {rest}")
+
+            self.gdb.send_command(f"-break-watch {flag} {expr}", callback)
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Add", command=add).pack(side=tk.BOTTOM, pady=5)
+
+    def run_to_cursor(self):
+        if not self.current_source: return
+        
+        # Get line from cursor position
+        try:
+            line = int(self.source_text.index(tk.INSERT).split('.')[0])
+        except Exception: return
+
+        filename = os.path.abspath(os.path.normpath(self.current_source)).replace('\\', '/')
+        
+        def callback(result_class, rest):
+            if result_class == "^done":
+                # Successfully set temporary breakpoint, now continue
+                self.go()
+            else:
+                self.log(f"Run to Cursor failed: {rest}")
+
+        self.gdb.send_command(f'-break-insert -t "{filename}:{line}"', callback)
 
     def add_watch(self):
-        var_name = simpledialog.askstring("Add Watch", "Variable name:")
+        var_name = simpledialog.askstring("Add Watch", "Variable or Expression:")
         if var_name:
             self.add_watch_with_name(var_name)
 
@@ -2779,13 +3180,12 @@ class OzonePy(tk.Tk):
         reset_recursive(self.watches)
         self._refresh_watch_tree_values()
 
-    def read_memory(self):
+    def read_memory(self, count=256, callback=None):
         addr = self.mem_addr_entry.get().strip()
         if not addr:
             return
 
-        # Read 256 bytes by default
-        def callback(result_class, rest):
+        def default_callback(result_class, rest):
             if result_class == "^done":
                 # Parse memory=[{begin="...",end="...",contents="..."}]
                 match = re.search(r'contents="([0-9a-fA-F]+)"', rest)
@@ -2802,7 +3202,208 @@ class OzonePy(tk.Tk):
             else:
                 self.log(f"Failed to read memory at {addr}: {rest}")
 
-        self.gdb.send_command(f'-data-read-memory-bytes {addr} 256', callback)
+        cb = callback if callback else default_callback
+        self.gdb.send_command(f'-data-read-memory-bytes {addr} {count}', cb)
+
+    def export_memory(self):
+        addr = self.mem_addr_entry.get().strip()
+        if not addr:
+            messagebox.showwarning("Export Memory", "Please enter a memory address first.")
+            return
+
+        count = simpledialog.askinteger("Export Memory", f"Number of bytes to export from {addr}:", initialvalue=256, minvalue=1)
+        if not count:
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".bin",
+            filetypes=[("Binary files", "*.bin"), ("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")],
+            title="Export Memory"
+        )
+        if not file_path:
+            return
+
+        def callback(result_class, rest):
+            if result_class == "^done":
+                match = re.search(r'contents="([0-9a-fA-F]+)"', rest)
+                if not match:
+                    self.after(0, lambda: messagebox.showerror("Export Memory", "Failed to read memory contents."))
+                    return
+                
+                hex_data = match.group(1)
+                data = bytes.fromhex(hex_data)
+
+                try:
+                    if file_path.endswith(".csv"):
+                        with open(file_path, "w") as f:
+                            f.write("Address,Value\n")
+                            start_addr = int(addr, 16)
+                            for i, b in enumerate(data):
+                                f.write(f"0x{start_addr + i:08X},0x{b:02X}\n")
+                    elif file_path.endswith(".json"):
+                        start_addr = int(addr, 16)
+                        export_data = {
+                            "address": addr,
+                            "length": len(data),
+                            "data": [f"0x{b:02X}" for b in data]
+                        }
+                        with open(file_path, "w") as f:
+                            json.dump(export_data, f, indent=4)
+                    else: # Default to BIN
+                        with open(file_path, "wb") as f:
+                            f.write(data)
+                    
+                    self.after(0, lambda: messagebox.showinfo("Export Memory", f"Successfully exported {len(data)} bytes to {os.path.basename(file_path)}"))
+                except Exception as e:
+                    self.after(0, lambda: messagebox.showerror("Export Memory", f"Error writing file: {e}"))
+            else:
+                self.after(0, lambda: messagebox.showerror("Export Memory", f"GDB Error: {rest}"))
+
+        self.gdb.send_command(f'-data-read-memory-bytes {addr} {count}', callback)
+
+    def export_registers(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")],
+            title="Export Registers"
+        )
+        if not file_path:
+            return
+
+        def reg_callback(result_class, rest):
+            if result_class == "^done":
+                vals = re.findall(r'number="(\d+)",value="([^"]+)"', rest)
+                try:
+                    if file_path.endswith(".json"):
+                        export_data = {f"r{num}": val for num, val in vals}
+                        with open(file_path, "w") as f:
+                            json.dump(export_data, f, indent=4)
+                    else: # Default to CSV
+                        with open(file_path, "w") as f:
+                            f.write("Register,Value\n")
+                            for num, val in vals:
+                                f.write(f"r{num},{val}\n")
+                    
+                    self.after(0, lambda: messagebox.showinfo("Export Registers", f"Successfully exported {len(vals)} registers to {os.path.basename(file_path)}"))
+                except Exception as e:
+                    self.after(0, lambda: messagebox.showerror("Export Registers", f"Error writing file: {e}"))
+            else:
+                self.after(0, lambda: messagebox.showerror("Export Registers", f"GDB Error: {rest}"))
+
+        self.gdb.send_command("-data-list-register-values x", reg_callback)
+
+    def show_memory_plotter(self):
+        # Create a non-modal configuration dialog
+        plot_win = tk.Toplevel(self)
+        plot_win.title("Memory Plotter")
+        plot_win.geometry("400x300")
+
+        ttk.Label(plot_win, text="Address:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        addr_var = tk.StringVar(value=self.mem_addr_entry.get())
+        ttk.Entry(plot_win, textvariable=addr_var).grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
+
+        ttk.Label(plot_win, text="Count (elements):").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        count_var = tk.IntVar(value=64)
+        ttk.Entry(plot_win, textvariable=count_var).grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+
+        ttk.Label(plot_win, text="Data Type:").grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
+        type_var = tk.StringVar(value="uint8")
+        type_combo = ttk.Combobox(plot_win, textvariable=type_var, values=["uint8", "int8", "uint16", "int16", "uint32", "int32"])
+        type_combo.grid(row=2, column=1, padx=5, pady=5, sticky=tk.EW)
+
+        ttk.Label(plot_win, text="Refresh (ms):").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
+        refresh_var = tk.IntVar(value=1000)
+        ttk.Entry(plot_win, textvariable=refresh_var).grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
+
+        canvas = tk.Canvas(plot_win, bg="white", height=150)
+        canvas.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+
+        plot_win.grid_rowconfigure(4, weight=1)
+        plot_win.grid_columnconfigure(1, weight=1)
+
+        running_plot = [False]
+
+        def update_plot():
+            if not plot_win.winfo_exists() or not running_plot[0]:
+                return
+
+            addr = addr_var.get()
+            count = count_count = count_var.get()
+            d_type = type_var.get()
+            
+            # Map type to byte size
+            size_map = {"uint8": 1, "int8": 1, "uint16": 2, "int16": 2, "uint32": 4, "int32": 4}
+            elem_size = size_map.get(d_type, 1)
+            total_bytes = count * elem_size
+
+            def callback(result_class, rest):
+                if result_class == "^done" and "contents" in rest:
+                    match = re.search(r'contents="([0-9a-fA-F]+)"', rest)
+                    if match:
+                        hex_data = match.group(1)
+                        data_bytes = bytes.fromhex(hex_data)
+                        values = []
+                        for i in range(0, len(data_bytes), elem_size):
+                            chunk = data_bytes[i:i+elem_size]
+                            if len(chunk) < elem_size: break
+                            
+                            if d_type == "uint8": val = chunk[0]
+                            elif d_type == "int8": val = int.from_bytes(chunk, "little", signed=True)
+                            elif d_type == "uint16": val = int.from_bytes(chunk, "little", signed=False)
+                            elif d_type == "int16": val = int.from_bytes(chunk, "little", signed=True)
+                            elif d_type == "uint32": val = int.from_bytes(chunk, "little", signed=False)
+                            elif d_type == "int32": val = int.from_bytes(chunk, "little", signed=True)
+                            else: val = chunk[0]
+                            values.append(val)
+                        
+                        self.after(0, lambda: draw_values(values))
+                
+                if running_plot[0]:
+                    self.after(refresh_var.get(), update_plot)
+
+            self.gdb.send_command(f'-data-read-memory-bytes {addr} {total_bytes}', callback)
+
+        def draw_values(values):
+            if not canvas.winfo_exists(): return
+            canvas.delete("all")
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if not values or len(values) < 2: return
+
+            min_v = min(values)
+            max_v = max(values)
+            if max_v == min_v:
+                max_v += 1
+                min_v -= 1
+            
+            span = max_v - min_v
+            dx = w / (len(values) - 1)
+            
+            points = []
+            for i, v in enumerate(values):
+                x = i * dx
+                y = h - ((v - min_v) / span * h)
+                points.append((x, y))
+            
+            for i in range(len(points) - 1):
+                canvas.create_line(points[i][0], points[i][1], points[i+1][0], points[i+1][1], fill="blue")
+            
+            canvas.create_text(5, 5, anchor=tk.NW, text=f"Max: {max_v}")
+            canvas.create_text(5, h-5, anchor=tk.SW, text=f"Min: {min_v}")
+
+        def toggle():
+            if running_plot[0]:
+                running_plot[0] = False
+                btn_start.config(text="Start Plotting")
+            else:
+                running_plot[0] = True
+                btn_start.config(text="Stop Plotting")
+                update_plot()
+
+        btn_start = ttk.Button(plot_win, text="Start Plotting", command=toggle)
+        btn_start.grid(row=5, column=0, columnspan=2, pady=5)
+        
+        plot_win.protocol("WM_DELETE_WINDOW", lambda: [running_plot.__setitem__(0, False), plot_win.destroy()])
 
     def _format_hex_dump(self, start_addr, hex_data):
         try:
@@ -2845,6 +3446,101 @@ class OzonePy(tk.Tk):
 
         self.gdb.send_command("-data-list-register-values x", reg_callback)
 
+    def _update_threads(self):
+        def threads_callback(result_class, rest):
+            if result_class == "^done":
+                # rest looks like: threads=[{id="1",target-id="Thread 1.1",name="main",state="stopped",frame={...}},...]
+                # current-thread-id="1"
+                
+                # Extract the threads list
+                threads = []
+                pos = 0
+                threads_match = re.search(r'threads=\[', rest)
+                if threads_match:
+                    pos = threads_match.end() - 1
+                    # Robustly find each thread={...}
+                    while True:
+                        match = re.search(r'\{', rest[pos:])
+                        if not match: break
+                        
+                        start_idx = pos + match.start()
+                        brace_count = 0
+                        end_idx = -1
+                        for i in range(start_idx, len(rest)):
+                            if rest[i] == '{': brace_count += 1
+                            elif rest[i] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = i
+                                    break
+                        if end_idx != -1:
+                            thread_str = rest[start_idx+1 : end_idx]
+                            threads.append(thread_str)
+                            pos = end_idx + 1
+                        else: break
+
+                current_thread_id = None
+                curr_match = re.search(r'current-thread-id="(\d+)"', rest)
+                if curr_match:
+                    current_thread_id = curr_match.group(1)
+
+                def update_ui():
+                    if not self.winfo_exists(): return
+                    for item in self.threads_tree.get_children():
+                        self.threads_tree.delete(item)
+                    
+                    for thread_str in threads:
+                        tid = re.search(r'id="([^"]+)"', thread_str)
+                        target_id = re.search(r'target-id="([^"]+)"', thread_str)
+                        name = re.search(r'name="([^"]+)"', thread_str)
+                        state = re.search(r'state="([^"]+)"', thread_str)
+                        # Frame might be complex, just get func/line
+                        frame_func = re.search(r'func="([^"]+)"', thread_str)
+                        frame_line = re.search(r'line="(\d+)"', thread_str)
+                        
+                        tid_val = tid.group(1) if tid else "?"
+                        target_val = target_id.group(1) if target_id else "?"
+                        name_val = name.group(1) if name else ""
+                        state_val = state.group(1) if state else "?"
+                        
+                        f_func = frame_func.group(1) if frame_func else ""
+                        f_line = frame_line.group(1) if frame_line else ""
+                        frame_val = f"{f_func}:{f_line}" if f_func else ""
+
+                        item = self.threads_tree.insert("", tk.END, values=(tid_val, target_val, name_val, state_val, frame_val))
+                        if tid_val == current_thread_id:
+                            self.threads_tree.selection_set(item)
+
+                self.after(0, update_ui)
+
+        self.gdb.send_command("-thread-info", threads_callback)
+
+    def _on_thread_double_click(self, event):
+        selection = self.threads_tree.selection()
+        if not selection: return
+        
+        thread_id = self.threads_tree.item(selection[0], "values")[0]
+        
+        def select_callback(result_class, rest):
+            if result_class == "^done":
+                self.log(f"Switched to thread {thread_id}")
+                # Update UI for the new thread
+                self._update_registers()
+                self._update_call_stack()
+                # Also request frame info to update source view
+                self.gdb.send_command("-stack-info-frame", self._get_frame_info_callback())
+
+        self.gdb.send_command(f"-thread-select {thread_id}", select_callback)
+
+    def _get_frame_info_callback(self):
+        def callback(result_class, rest):
+            if result_class == "^done":
+                f_match = re.search(r'fullname="([^"]+)"', rest)
+                l_match = re.search(r'line="(\d+)"', rest)
+                if f_match and l_match:
+                    self._update_source_view(f_match.group(1).replace(r'\\', '\\'), int(l_match.group(1)))
+        return callback
+
     def _update_call_stack(self):
         self.debug_log("DEBUG: _update_call_stack() called", "debug")
         def stack_callback(result_class, rest):
@@ -2855,22 +3551,22 @@ class OzonePy(tk.Tk):
                 try:
                     if result_class == "^done":
                         self.debug_log(f"STACK RECV: {rest}", "mi-recv")
-                        
+
                         frames = []
                         pos = 0
                         # Sometimes rest starts with stack=[...], if so, find start of list
                         list_match = re.search(r'stack=\[', rest)
                         if list_match:
                             pos = list_match.end() - 1 # include [
-                        
+
                         # Robustly find frame={ or frame = {
                         while True:
                             match = re.search(r'frame\s*=\s*\{', rest[pos:])
                             if not match:
                                 break
-                            
-                            start_idx = pos + match.end() - 1 
-                            
+
+                            start_idx = pos + match.end() - 1
+
                             brace_count = 0
                             end_idx = -1
                             for i in range(start_idx, len(rest)):
@@ -2881,7 +3577,7 @@ class OzonePy(tk.Tk):
                                     if brace_count == 0:
                                         end_idx = i
                                         break
-                        
+
                             if end_idx != -1:
                                 frame_str = rest[start_idx+1 : end_idx]
                                 frames.append(frame_str)
@@ -2889,7 +3585,7 @@ class OzonePy(tk.Tk):
                             else:
                                 self.debug_log(f"STACK ERROR: Unbalanced braces in {rest[pos:pos+50]}...", "error")
                                 break
-                    
+
                         if not frames:
                             self.debug_log(f"STACK ERROR: No frames found in {rest}. Trying secondary fallback parser.", "error")
                             # Fallback to simple re.findall for frame={...} if brace balancing failed to find anything
@@ -2899,26 +3595,28 @@ class OzonePy(tk.Tk):
 
                         for item in self.stack_tree.get_children():
                             self.stack_tree.delete(item)
-                    
+
                         for i, frame_str in enumerate(frames):
                             # More flexible field matching
                             f_match = re.search(r'fullname\s*=\s*"([^"]+)"', frame_str)
                             if not f_match:
                                 f_match = re.search(r'file\s*=\s*"([^"]+)"', frame_str)
-                            
+
                             l_match = re.search(r'line\s*=\s*"(\d+)"', frame_str)
                             fn_match = re.search(r'func\s*=\s*"([^"]+)"', frame_str)
                             lvl_match = re.search(r'level\s*=\s*"(\d+)"', frame_str)
-                        
+
                             fullname = f_match.group(1).replace(r'\\', '\\') if f_match else ""
                             line = l_match.group(1) if l_match else ""
                             func = fn_match.group(1) if fn_match else "???"
                             level = lvl_match.group(1) if lvl_match else str(i)
-                        
+
+                            if self.coverage_enabled.get():
+                                self._update_coverage_stats(func)
+
                             self.stack_tree.insert("", tk.END, text=level, values=(func, os.path.basename(fullname), line), tags=(fullname,))
-                        
+
                         self.update_idletasks()
-                        self.update()
                     else:
                         self.debug_log(f"STACK ERROR: {result_class} {rest}", "error")
                 except (tk.TclError, AttributeError, Exception) as e:
@@ -2989,11 +3687,14 @@ class OzonePy(tk.Tk):
                 self.line_numbers.insert(tk.END, f"{i}\n")
             self.line_numbers.config(state=tk.DISABLED)
 
+            self.line_numbers.yview_moveto(self.source_text.yview()[0])
+
             self._apply_syntax_highlighting()
             self._refresh_source_tags()
 
         self.source_text.tag_remove("current_line", '1.0', tk.END)
         self.line_numbers.tag_remove("current_line", '1.0', tk.END)
+        self.line_numbers.tag_remove("inline_var_padding", '1.0', tk.END)
         self.source_text.tag_remove("hit_breakpoint", '1.0', tk.END)
         self.line_numbers.tag_remove("hit_breakpoint", '1.0', tk.END)
         self.source_text.tag_remove("inline_var", '1.0', tk.END)
@@ -3003,13 +3704,12 @@ class OzonePy(tk.Tk):
 
         if line > 0:
             self.current_line = line
-            tag_name = "hit_breakpoint" if is_hit else "current_line"
-            self.source_text.tag_add(tag_name, f"{line}.0", f"{line}.end")
-            self.line_numbers.tag_add(tag_name, f"{line}.0", f"{line}.end")
+            # Highlights are now handled by _refresh_source_tags
+            self._refresh_source_tags()
             self.source_text.see(f"{line}.0")
             self.line_numbers.see(f"{line}.0")
 
-        self.update() # Force refresh
+        self.update_idletasks() # Force refresh
 
     def _apply_syntax_highlighting(self):
         # Simple syntax highlighting for comments
@@ -3154,7 +3854,233 @@ class OzonePy(tk.Tk):
         if self.tooltip:
             self.tooltip.destroy()
             self.tooltip = None
-            self.last_hover_word = None
+
+    def _on_toggle_coverage(self):
+        if self.coverage_enabled.get():
+            self._get_all_functions()
+            self._start_coverage_timer()
+        else:
+            self._update_coverage_ui()
+
+    def _start_coverage_timer(self):
+        if self.coverage_enabled.get() and self.target_connected:
+            self._update_on_the_fly_coverage()
+            self.after(1000, self._start_coverage_timer)
+
+    def _update_on_the_fly_coverage(self):
+        if not self.is_running:
+            return
+
+        def pc_callback(result_class, rest):
+            if result_class == "^done":
+                # Extract value="0x..."
+                match = re.search(r'value="([^"]+)"', rest)
+                if match:
+                    pc_val = match.group(1)
+                    # Get function name for this PC
+                    def func_callback(res_class, res_rest):
+                        if res_class == "^done":
+                            # console output like "0x08000100 in main ()\n"
+                            f_match = re.search(r'in\s+([\w\d_]+)', res_rest)
+                            if f_match:
+                                self._update_coverage_stats(f_match.group(1))
+
+                    self.gdb.send_command(f'-interpreter-exec console "info symbol {pc_val}"', func_callback)
+
+        # We try to get PC even if running, though many GDB servers won't allow this
+        # unless non-stop mode is on. But if it fails, it just won't update "on the fly".
+        self.gdb.send_command("-data-evaluate-expression $pc", pc_callback)
+
+    def _reset_coverage(self):
+        self.hit_functions = {}
+        for func in self.all_functions:
+            self.hit_functions[func] = 0
+        self._update_coverage_ui()
+
+    def _get_all_functions(self):
+        if not self.elf_path:
+            return
+
+        # Attempt to use 'nm' to get all functions from the ELF file
+        # 'nm' is typically in the same directory as 'gdb'
+        nm_path = self.gdb.gdb_path.replace("-gdb", "-nm").replace("gdb", "nm")
+        if not os.path.exists(nm_path):
+            # Fallback to system 'nm'
+            nm_path = shutil.which("arm-none-eabi-nm") or shutil.which("nm") or "nm"
+
+        try:
+            self.debug_log(f"Running nm to get functions from {self.elf_path} using {nm_path}", "info")
+            # -S: print size
+            # --defined-only: only defined symbols
+            # -n: sort numerically
+            # We want all text (code) symbols: T or t
+            res = subprocess.run([nm_path, "-S", "--defined-only", self.elf_path], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                self.all_functions = []
+                self.hit_functions = {}
+                self.enabled_functions = {}
+                # Parse nm output. Format: <address> <size> <type> <name>
+                # Type 'T' or 't' for functions in .text section
+                lines = res.stdout.splitlines()
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        sym_type = parts[2]
+                        sym_name = parts[3]
+                        if sym_type.upper() == 'T' and not sym_name.startswith('_'):
+                            if sym_name not in self.all_functions:
+                                self.all_functions.append(sym_name)
+                                self.hit_functions[sym_name] = 0
+                                self.enabled_functions[sym_name] = True
+
+                self.all_functions.sort()
+                self._update_coverage_ui()
+                self.debug_log(f"Extracted {len(self.all_functions)} functions from ELF using nm.", "info")
+                return
+        except Exception as e:
+            self.debug_log(f"Error running nm: {e}. Falling back to GDB 'info functions'.", "warn")
+
+        # Fallback to GDB CLI 'info functions'
+        if self.gdb.process:
+            self.gdb.send_command('-interpreter-exec console "info functions"', self._parse_functions_callback)
+
+    def _parse_functions_callback(self, result_class, rest):
+        if result_class == "^done":
+            self.collecting_functions = True
+            self.all_functions = []
+            self.hit_functions = {}
+            self.enabled_functions = {}
+            # The output comes as 'console' type responses in _poll_gdb_responses.
+
+    def _process_console_for_functions(self, text):
+        # Look for function names in "File path/to/file.c:\nstatic int func_name(args);\n"
+        # or just "int func_name(args);"
+        # GDB info functions output often has lines like:
+        # File main.c:
+        # 12:	void main(void);
+        # 15:	static int helper(int);
+        # Non-debugging symbols:
+        # 0x08000100  Reset_Handler
+
+        # Regex to match function names in info functions output:
+        # 1. Debug symbols: [line_num]:\t[return_type] [func_name]([args]);
+        # 2. Non-debug symbols: [address]  [func_name]
+
+        debug_matches = re.findall(r'^\d+:\s+[\w\*\s]+?\s+([\w\d_]+)\s*\(', text, re.MULTILINE)
+        non_debug_matches = re.findall(r'^0x[0-9a-fA-F]+\s+([\w\d_]+)$', text, re.MULTILINE)
+
+        found_count = 0
+        for m in debug_matches + non_debug_matches:
+            if m.startswith('_'):
+                continue
+            if m not in self.all_functions:
+                self.all_functions.append(m)
+                self.hit_functions[m] = 0
+                self.enabled_functions[m] = True
+                found_count += 1
+
+        if found_count > 0:
+            self.all_functions.sort()
+            self._update_coverage_ui()
+            self.debug_log(f"Discovered {found_count} new functions. Total: {len(self.all_functions)}", "info")
+
+    def _update_coverage_stats(self, func_name):
+        if not self.coverage_enabled.get() or not func_name:
+            return
+
+        # Check if function is enabled for coverage
+        if not self.enabled_functions.get(func_name, True):
+            return
+
+        if func_name in self.hit_functions:
+            self.hit_functions[func_name] += 1
+        else:
+            # If it's a new function not in our initial list (e.g. dynamic or just found)
+            if func_name not in self.all_functions:
+                self.all_functions.append(func_name)
+                self.all_functions.sort()
+                self.enabled_functions[func_name] = True
+            self.hit_functions[func_name] = 1
+
+        self.after(0, self._schedule_coverage_ui_update)
+
+    def _schedule_coverage_ui_update(self):
+        if not self._coverage_update_pending:
+            self._coverage_update_pending = True
+            # Debounce: only update UI at most every 100ms
+            self.after(100, self._do_coverage_ui_update)
+
+    def _do_coverage_ui_update(self):
+        self._coverage_update_pending = False
+        if self.winfo_exists():
+            self._update_coverage_ui()
+
+    def _update_coverage_ui(self):
+        # Only count functions that are enabled for coverage
+        enabled_funcs = [f for f in self.all_functions if self.enabled_functions.get(f, True)]
+        total = len(enabled_funcs)
+
+        if total > 0:
+            hit_count = sum(1 for func in enabled_funcs if self.hit_functions.get(func, 0) > 0)
+            pct = (hit_count / total) * 100
+            self.overall_coverage_pct.set(pct)
+            self.coverage_pct_label.config(text=f"{pct:.1f}% ({hit_count}/{total} functions)")
+        else:
+            self.coverage_pct_label.config(text="0.0% (0/0 functions)")
+
+        # Update Treeview
+        # To avoid flickering, we can update existing items or clear and rebuild
+        # Map existing items by function name (strip "☑ " or "☐ ")
+        current_items = {}
+        for item in self.coverage_tree.get_children():
+            text = self.coverage_tree.item(item)['text']
+            if len(text) > 2:
+                func_name = text[2:]
+                current_items[func_name] = item
+
+        for func in self.all_functions:
+            hits = self.hit_functions.get(func, 0)
+            enabled = self.enabled_functions.get(func, True)
+            check_mark = "☑" if enabled else "☐"
+            display_name = f"{check_mark} {func}"
+
+            if func in current_items:
+                self.coverage_tree.item(current_items[func], text=display_name, values=(hits,))
+            else:
+                self.coverage_tree.insert("", tk.END, text=display_name, values=(hits,))
+
+        # Clean up any items that might have been removed from all_functions
+        all_funcs_set = set(self.all_functions)
+        for func_name, item in current_items.items():
+            if func_name not in all_funcs_set:
+                self.coverage_tree.delete(item)
+
+        self.last_hover_word = None
+
+    def _on_tree_click(self, event):
+        item_id = self.coverage_tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        column = self.coverage_tree.identify_column(event.x)
+        # Only toggle if clicking the first column (#0)
+        if column == "#0":
+            display_name = self.coverage_tree.item(item_id, "text")
+            # Extract function name (skip "☑ " or "☐ ")
+            func_name = display_name[2:]
+
+            # Toggle enabled state
+            current_state = self.enabled_functions.get(func_name, True)
+            self.enabled_functions[func_name] = not current_state
+
+            # Update UI
+            self._update_coverage_ui()
+
+    def _on_global_toggle_all(self):
+        new_state = self.global_coverage_all_checked.get()
+        for func in self.all_functions:
+            self.enabled_functions[func] = new_state
+        self._update_coverage_ui()
 
     def quit(self):
         if hasattr(self, 'gdb'):

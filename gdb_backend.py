@@ -15,6 +15,13 @@ class GdbBackend:
         self.on_response_callback = on_response_callback
         self.target_connected = False
 
+    def restart_with_path(self, new_gdb_path):
+        """Restart GDB with a different executable path."""
+        if self.process:
+            self.stop()
+        self.gdb_path = new_gdb_path
+        self.start()
+
     def start(self):
         if self.process:
             return
@@ -42,6 +49,9 @@ class GdbBackend:
         # Enable mi-async to allow MI commands like -exec-interrupt
         # while the target is running. This is the proper way in GDB spec.
         self.send_command("-gdb-set mi-async on")
+        # Also enable target-async to allow target execution to happen in the background
+        # when using remote targets.
+        self.send_command("-gdb-set target-async on")
 
     def stop(self):
         self.running = False

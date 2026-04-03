@@ -34,6 +34,10 @@ else:
             # Fallback to system GDB if no ARM GDB found, but warn later
             GDB_PATH = shutil.which("gdb") or "arm-none-eabi-gdb"
 
+    # Find paths for other GDB variants
+    SYSTEM_GDB = shutil.which("gdb")
+    ARM_GDB_PATH = GDB_PATH # Default discovered ARM GDB
+
     # Priority for ST GDB if requested or found, as it's the most compatible for ST-LINK tasks
     # But ONLY if it actually runs. We'll check its health later in _check_gdb_working().
     if os.path.exists(st_gdb_path):
@@ -1245,31 +1249,40 @@ class OzonePy(tk.Tk):
     def set_gdb_server(self):
         d = tk.Toplevel(self)
         d.title("GDB Server Settings")
-        d.geometry("400x420")
+        d.geometry("400x480")
 
-        ttk.Label(d, text="GDB Server Address (host:port):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.gdb_server_address).pack(fill=tk.X, padx=5)
+        # Parse current address
+        host_port = self.gdb_server_address.get().split(':')
+        current_host = host_port[0] if len(host_port) > 0 else "localhost"
+        current_port = host_port[1] if len(host_port) > 1 else "3333"
+
+        host_var = tk.StringVar(value=current_host)
+        port_var = tk.StringVar(value=current_port)
+
+        ttk.Label(d, text="GDB Server Host (IP or hostname):").pack(padx=5, pady=2, anchor=tk.W)
+        ttk.Entry(d, textvariable=host_var).pack(fill=tk.X, padx=5)
+
+        ttk.Label(d, text="GDB Server Port:").pack(padx=5, pady=2, anchor=tk.W)
+        ttk.Entry(d, textvariable=port_var).pack(fill=tk.X, padx=5)
 
         def test_connection():
-            address = self.gdb_server_address.get()
+            host = host_var.get().strip() or "localhost"
+            port = port_var.get().strip() or "3333"
             try:
-                host_port = address.split(':')
-                if len(host_port) == 2:
-                    host, port = host_port
-                    if host == "localhost": host = "127.0.0.1"
-                    if self._is_port_in_use(port):
-                        messagebox.showinfo("Test Connection", f"SUCCESS: Port {port} on {host} is OPEN and reachable.")
-                    else:
-                        messagebox.showwarning("Test Connection", f"FAILED: Port {port} on {host} is CLOSED.\n\nEnsure your GDB server is running and listening on this port.")
+                test_host = "127.0.0.1" if host == "localhost" else host
+                if self._is_port_in_use(port):
+                    messagebox.showinfo("Test Connection", f"SUCCESS: Port {port} on {host} is OPEN and reachable.")
                 else:
-                    messagebox.showerror("Test Connection", "Invalid address format. Use host:port (e.g., localhost:3333)")
+                    messagebox.showwarning("Test Connection", f"FAILED: Port {port} on {host} is CLOSED.\n\nEnsure your GDB server is running and listening on this port.")
             except Exception as e:
                 messagebox.showerror("Test Connection", f"Error testing connection: {e}")
 
         ttk.Button(d, text="Test Connection", command=test_connection).pack(pady=5)
 
-        ttk.Label(d, text="GDB Architecture (e.g., armv7e-m, armv6-m, auto):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.gdb_architecture).pack(fill=tk.X, padx=5)
+        ttk.Label(d, text="GDB Architecture (ARM variants):").pack(padx=5, pady=2, anchor=tk.W)
+        arch_list = ["armv7e-m", "armv7-m", "armv6-m", "armv8-m.main", "armv8-m.base", "auto"]
+        arch_combo = ttk.Combobox(d, textvariable=self.gdb_architecture, values=arch_list)
+        arch_combo.pack(fill=tk.X, padx=5)
         ttk.Label(d, text="Common values: armv7e-m (M4F/M7), armv7-m (M3), armv6-m (M0)",
                   font=('Segoe UI', 8)).pack(padx=5, anchor=tk.W)
 
@@ -1286,6 +1299,9 @@ class OzonePy(tk.Tk):
                   font=('Segoe UI', 8)).pack(padx=5, anchor=tk.W)
 
         def save():
+            new_host = host_var.get().strip() or "localhost"
+            new_port = port_var.get().strip() or "3333"
+            self.gdb_server_address.set(f"{new_host}:{new_port}")
             self._update_connect_menu()
             self.log(f"GDB Settings updated: {self.gdb_server_address.get()}, Arch: {self.gdb_architecture.get()}")
             d.destroy()
@@ -1685,8 +1701,94 @@ class OzonePy(tk.Tk):
         self.connect_menu.add_command(label=f"OpenOCD (Auto-start Server)", command=self.connect_openocd_auto)
         self.connect_menu.add_command(label=f"ST-LINK (Auto-start Server)", command=self.connect_stlink_auto)
         self.connect_menu.add_separator()
-        self.connect_menu.add_command(label=f"Generic GDB Server ({addr})", command=lambda: self.connect_target(addr))
-        self.connect_menu.add_command(label=f"Existing OpenOCD ({addr})", command=lambda: self.connect_target(addr))
+        self.connect_menu.add_command(label=f"Connect to GDB Server ({addr})", command=lambda: self._prompt_arch_and_connect(addr))
+
+    def _prompt_arch_and_connect(self, address):
+        """Show a dialog to select the architecture before connecting."""
+        d = tk.Toplevel(self)
+        d.title("Select Architecture")
+        d.geometry("350x250")
+        d.transient(self)
+        d.grab_set()
+
+        ttk.Label(d, text=f"Select target architecture for\n{address}:", justify=tk.CENTER).pack(pady=10)
+
+        # Common architectures
+        arch_list = [
+            "arm", "armv7e-m", "armv7-m", "armv6-m", "armv8-m.main", "armv8-m.base",
+            "i386", "i386:x86-64", "mips", "powerpc", "riscv", "auto"
+        ]
+        
+        # Mapping for user-friendly names
+        arch_display = {
+            "i386": "x86 (i386)",
+            "i386:x86-64": "x86_64",
+            "arm": "ARM (generic)",
+            "armv7e-m": "ARM Cortex-M4/M7 (armv7e-m)",
+            "armv7-m": "ARM Cortex-M3 (armv7-m)",
+            "armv6-m": "ARM Cortex-M0 (armv6-m)",
+            "armv8-m.main": "ARM Cortex-M33 (armv8-m.main)",
+            "armv8-m.base": "ARM Cortex-M23 (armv8-m.base)",
+            "mips": "MIPS",
+            "powerpc": "PowerPC",
+            "riscv": "RISC-V",
+            "auto": "Auto-detect"
+        }
+
+        display_list = [arch_display.get(a, a) for a in arch_list]
+        selected_display = tk.StringVar(value=arch_display.get(self.gdb_architecture.get(), self.gdb_architecture.get()))
+
+        combo = ttk.Combobox(d, textvariable=selected_display, values=display_list, state="readonly")
+        combo.pack(fill=tk.X, padx=20, pady=10)
+
+        def on_connect():
+            # Find the actual GDB architecture string from the display name
+            display_val = selected_display.get()
+            final_arch = "auto"
+            for k, v in arch_display.items():
+                if v == display_val:
+                    final_arch = k
+                    break
+            
+            self.gdb_architecture.set(final_arch)
+            
+            # Switch GDB executable if needed based on architecture
+            is_x86 = final_arch.startswith('i386')
+            current_gdb = self.gdb.gdb_path
+            
+            target_gdb = None
+            if is_x86:
+                if SYSTEM_GDB and "arm" not in os.path.basename(SYSTEM_GDB).lower():
+                    target_gdb = SYSTEM_GDB
+                else:
+                    self.log("Warning: No suitable x86 GDB found, using current.", "error")
+            else:
+                target_gdb = ARM_GDB_PATH
+
+            if target_gdb and target_gdb != current_gdb:
+                self.log(f"Switching GDB to {target_gdb} for architecture {final_arch}")
+                self.gdb.restart_with_path(target_gdb)
+
+            d.destroy()
+            self.connect_target(address)
+
+        def on_cancel():
+            d.destroy()
+
+        btn_frame = ttk.Frame(d)
+        btn_frame.pack(pady=20)
+        ttk.Button(btn_frame, text="Connect", command=on_connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        # Center dialog
+        d.update_idletasks()
+        width = d.winfo_width()
+        height = d.winfo_height()
+        x = (d.winfo_screenwidth() // 2) - (width // 2)
+        y = (d.winfo_screenheight() // 2) - (height // 2)
+        d.geometry(f'+{x}+{y}')
+        
+        self.wait_window(d)
 
     def _read_server_output(self, process):
         if not process:
@@ -2245,6 +2347,10 @@ class OzonePy(tk.Tk):
         if hasattr(self, 'download_progress') and self.download_progress:
             self.download_progress.close()
         
+        # Ensure async mode is on for remote targets
+        self.gdb.send_command("-gdb-set mi-async on")
+        self.gdb.send_command("-gdb-set target-async on")
+        
         self.download_progress = ConnectionProgress(self, "Downloading ELF")
         self.download_progress.update(0, "Starting download...")
         
@@ -2262,6 +2368,8 @@ class OzonePy(tk.Tk):
 
     def go(self):
         self._reset_watch_changed_flags()
+        self.gdb.send_command("-gdb-set mi-async on")
+        self.gdb.send_command("-gdb-set target-async on")
         # Some targets might report being stopped even if they are about to run
         # Let's ensure we are in the correct state
         self._update_ui_for_execution_state(True)
@@ -2288,6 +2396,8 @@ class OzonePy(tk.Tk):
             self.log("Not connected to target.")
             return
 
+        self.gdb.send_command("-gdb-set mi-async on")
+        self.gdb.send_command("-gdb-set target-async on")
         self.log("Interrupting execution...")
         self.debug_log("Pause requested", "info")
 
@@ -2356,10 +2466,14 @@ class OzonePy(tk.Tk):
 
     def step(self):
         self._reset_watch_changed_flags()
+        self.gdb.send_command("-gdb-set mi-async on")
+        self.gdb.send_command("-gdb-set target-async on")
         self.gdb.send_command("-exec-step")
 
     def step_over(self):
         self._reset_watch_changed_flags()
+        self.gdb.send_command("-gdb-set mi-async on")
+        self.gdb.send_command("-gdb-set target-async on")
         self.gdb.send_command("-exec-next")
 
     def _on_mousewheel(self, event):

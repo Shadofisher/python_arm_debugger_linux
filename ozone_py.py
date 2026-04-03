@@ -4,6 +4,7 @@ import threading
 import queue
 import os
 import sys
+import getpass
 import re
 import shutil
 import socket
@@ -193,6 +194,7 @@ class OzonePy(tk.Tk):
         self.stlink_cubeprogrammer_path = tk.StringVar(value=actual_cubeprog_default)
         self.stlink_device = tk.StringVar(value="")          # -d <device_name>
         self.stlink_process = None
+        self.ssh_tunnel_process = None
         self.target_connected = False
         self.is_connecting = False
         self.is_running = False
@@ -1306,9 +1308,14 @@ class OzonePy(tk.Tk):
             self.log(f"GDB Settings updated: {self.gdb_server_address.get()}, Arch: {self.gdb_architecture.get()}")
             d.destroy()
 
+        def connect():
+            save()
+            self.after(100, lambda: self.connect_target(self.gdb_server_address.get()))
+
         btn_frame = ttk.Frame(d)
         btn_frame.pack(pady=10)
         ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Connect", command=connect).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=d.destroy).pack(side=tk.LEFT, padx=5)
 
     def set_jlink_settings(self):
@@ -1316,29 +1323,57 @@ class OzonePy(tk.Tk):
         d.title("J-Link Server Settings")
         d.geometry("450x380")
 
+        # Use local variables to allow Cancel to work correctly
+        path_var = tk.StringVar(value=self.jlink_server_path.get())
+        device_var = tk.StringVar(value=self.jlink_device.get())
+        interface_var = tk.StringVar(value=self.jlink_interface.get())
+        speed_var = tk.StringVar(value=self.jlink_speed.get())
+        script_var = tk.StringVar(value=self.jlink_script.get())
+
         ttk.Label(d, text="J-Link Server Path:").pack(padx=5, pady=2, anchor=tk.W)
         path_frame = ttk.Frame(d)
         path_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(path_frame, textvariable=self.jlink_server_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(path_frame, text="Browse", command=lambda: self.jlink_server_path.set(
+        ttk.Entry(path_frame, textvariable=path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(path_frame, text="Browse", command=lambda: path_var.set(
             filedialog.askopenfilename(filetypes=[("Executable", "*.exe;*"), ("All files", "*.*")]))).pack(side=tk.RIGHT)
 
         ttk.Label(d, text="Device:").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.jlink_device).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=device_var).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="Interface:").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Combobox(d, textvariable=self.jlink_interface, values=["SWD", "JTAG"]).pack(fill=tk.X, padx=5)
+        ttk.Combobox(d, textvariable=interface_var, values=["SWD", "JTAG"]).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="Speed (kHz):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.jlink_speed).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=speed_var).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="J-Link Script:").pack(padx=5, pady=2, anchor=tk.W)
         script_frame = ttk.Frame(d)
         script_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(script_frame, textvariable=self.jlink_script).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(script_frame, text="Browse", command=self.load_jlink_script).pack(side=tk.RIGHT)
+        ttk.Entry(script_frame, textvariable=script_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        def browse_script():
+            path = filedialog.askopenfilename(filetypes=[("J-Link Script", "*.jlinkscript"), ("All files", "*.*")])
+            if path: script_var.set(path)
+        ttk.Button(script_frame, text="Browse", command=browse_script).pack(side=tk.RIGHT)
 
-        ttk.Button(d, text="Close", command=d.destroy).pack(pady=10)
+        def save():
+            self.jlink_server_path.set(path_var.get())
+            self.jlink_device.set(device_var.get())
+            self.jlink_interface.set(interface_var.get())
+            self.jlink_speed.set(speed_var.get())
+            self.jlink_script.set(script_var.get())
+            self.log("J-Link settings updated.")
+            d.destroy()
+
+        def connect():
+            save()
+            self.after(100, self.connect_jlink_auto)
+
+        btn_frame = ttk.Frame(d)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Connect", command=connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=d.destroy).pack(side=tk.LEFT, padx=5)
 
     def load_jlink_script(self):
         path = filedialog.askopenfilename(filetypes=[("J-Link Script", "*.jlinkscript"), ("All files", "*.*")])
@@ -1351,21 +1386,38 @@ class OzonePy(tk.Tk):
         d.title("OpenOCD Server Settings")
         d.geometry("400x200")
 
+        path_var = tk.StringVar(value=self.openocd_server_path.get())
+        cfg_var = tk.StringVar(value=self.openocd_config_path.get())
+
         ttk.Label(d, text="OpenOCD Path:").pack(padx=5, pady=2, anchor=tk.W)
         path_frame = ttk.Frame(d)
         path_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(path_frame, textvariable=self.openocd_server_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(path_frame, text="Browse", command=lambda: self.openocd_server_path.set(
+        ttk.Entry(path_frame, textvariable=path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(path_frame, text="Browse", command=lambda: path_var.set(
             filedialog.askopenfilename(filetypes=[("Executable", "*.exe;*"), ("All files", "*.*")]))).pack(side=tk.RIGHT)
 
         ttk.Label(d, text="Config File:").pack(padx=5, pady=2, anchor=tk.W)
         cfg_frame = ttk.Frame(d)
         cfg_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(cfg_frame, textvariable=self.openocd_config_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(cfg_frame, text="Browse", command=lambda: self.openocd_config_path.set(
+        ttk.Entry(cfg_frame, textvariable=cfg_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(cfg_frame, text="Browse", command=lambda: cfg_var.set(
             filedialog.askopenfilename(filetypes=[("Config", "*.cfg"), ("All files", "*.*")]))).pack(side=tk.RIGHT)
 
-        ttk.Button(d, text="Close", command=d.destroy).pack(pady=10)
+        def save():
+            self.openocd_server_path.set(path_var.get())
+            self.openocd_config_path.set(cfg_var.get())
+            self.log("OpenOCD settings updated.")
+            d.destroy()
+
+        def connect():
+            save()
+            self.after(100, self.connect_openocd_auto)
+
+        btn_frame = ttk.Frame(d)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Connect", command=connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=d.destroy).pack(side=tk.LEFT, padx=5)
 
     def set_stlink_settings(self):
         d = tk.Toplevel(self)
@@ -1373,11 +1425,21 @@ class OzonePy(tk.Tk):
         d.geometry("500x480")
         d.resizable(True, True)
 
+        path_var = tk.StringVar(value=self.stlink_server_path.get())
+        cp_var = tk.StringVar(value=self.stlink_cubeprogrammer_path.get())
+        freq_var = tk.StringVar(value=self.stlink_frequency.get())
+        serial_var = tk.StringVar(value=self.stlink_serial.get())
+        device_var = tk.StringVar(value=self.stlink_device.get())
+        apid_var = tk.StringVar(value=self.stlink_apid.get())
+        reset_var = tk.BooleanVar(value=self.stlink_init_under_reset.get())
+        attach_var = tk.BooleanVar(value=self.stlink_attach.get())
+        persistent_var = tk.BooleanVar(value=self.stlink_persistent.get())
+
         ttk.Label(d, text="ST-LINK_gdbserver Path:").pack(padx=5, pady=2, anchor=tk.W)
         path_frame = ttk.Frame(d)
         path_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(path_frame, textvariable=self.stlink_server_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(path_frame, text="Browse", command=lambda: self.stlink_server_path.set(
+        ttk.Entry(path_frame, textvariable=path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(path_frame, text="Browse", command=lambda: path_var.set(
             filedialog.askopenfilename(title="Select ST-LINK_gdbserver",
                 filetypes=[("Executable", "*.exe;*"), ("All files", "*.*")])
         )).pack(side=tk.RIGHT)
@@ -1385,33 +1447,54 @@ class OzonePy(tk.Tk):
         ttk.Label(d, text="STM32CubeProgrammer Path (-cp):").pack(padx=5, pady=2, anchor=tk.W)
         cp_frame = ttk.Frame(d)
         cp_frame.pack(fill=tk.X, padx=5)
-        ttk.Entry(cp_frame, textvariable=self.stlink_cubeprogrammer_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(cp_frame, text="Browse", command=lambda: self.stlink_cubeprogrammer_path.set(
+        ttk.Entry(cp_frame, textvariable=cp_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(cp_frame, text="Browse", command=lambda: cp_var.set(
             filedialog.askdirectory(title="Select STM32CubeProgrammer Installation Directory")
         )).pack(side=tk.RIGHT)
 
         ttk.Label(d, text="Frequency (kHz) [--frequency]:").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.stlink_frequency).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=freq_var).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="ST-LINK Serial Number [-i] (leave blank for first found):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.stlink_serial).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=serial_var).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="Target MCU Device [-d] (e.g. STM32F411xE, leave blank for auto):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.stlink_device).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=device_var).pack(fill=tk.X, padx=5)
 
         ttk.Label(d, text="AP Index [-m] (0 = default core, use for multi-core):").pack(padx=5, pady=2, anchor=tk.W)
-        ttk.Entry(d, textvariable=self.stlink_apid).pack(fill=tk.X, padx=5)
+        ttk.Entry(d, textvariable=apid_var).pack(fill=tk.X, padx=5)
 
         options_frame = ttk.LabelFrame(d, text="Options")
         options_frame.pack(fill=tk.X, padx=5, pady=5)
         ttk.Checkbutton(options_frame, text="Initialize device under reset [-k]",
-                        variable=self.stlink_init_under_reset).pack(anchor=tk.W, padx=5, pady=2)
+                        variable=reset_var).pack(anchor=tk.W, padx=5, pady=2)
         ttk.Checkbutton(options_frame, text="Attach to running target, no reset [-g]",
-                        variable=self.stlink_attach).pack(anchor=tk.W, padx=5, pady=2)
+                        variable=attach_var).pack(anchor=tk.W, padx=5, pady=2)
         ttk.Checkbutton(options_frame, text="Persistent mode - keep server alive [-e]",
-                        variable=self.stlink_persistent).pack(anchor=tk.W, padx=5, pady=2)
+                        variable=persistent_var).pack(anchor=tk.W, padx=5, pady=2)
 
-        ttk.Button(d, text="Close", command=d.destroy).pack(pady=10)
+        def save():
+            self.stlink_server_path.set(path_var.get())
+            self.stlink_cubeprogrammer_path.set(cp_var.get())
+            self.stlink_frequency.set(freq_var.get())
+            self.stlink_serial.set(serial_var.get())
+            self.stlink_device.set(device_var.get())
+            self.stlink_apid.set(apid_var.get())
+            self.stlink_init_under_reset.set(reset_var.get())
+            self.stlink_attach.set(attach_var.get())
+            self.stlink_persistent.set(persistent_var.get())
+            self.log("ST-LINK settings updated.")
+            d.destroy()
+
+        def connect():
+            save()
+            self.after(100, self.connect_stlink_auto)
+
+        btn_frame = ttk.Frame(d)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Connect", command=connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=d.destroy).pack(side=tk.LEFT, padx=5)
 
     def connect_stlink_auto(self):
         self.debug_log("Starting ST-LINK auto-connect flow", "info")
@@ -1702,6 +1785,188 @@ class OzonePy(tk.Tk):
         self.connect_menu.add_command(label=f"ST-LINK (Auto-start Server)", command=self.connect_stlink_auto)
         self.connect_menu.add_separator()
         self.connect_menu.add_command(label=f"Connect to GDB Server ({addr})", command=lambda: self._prompt_arch_and_connect(addr))
+        self.connect_menu.add_command(label="Connect to Remote GDB Server...", command=self._prompt_remote_connect)
+
+    def _prompt_remote_connect(self):
+        """Show a dialog to input IP, Port and select architecture with optional SSH tunneling."""
+        d = tk.Toplevel(self)
+        d.title("Remote GDB Connection")
+        d.geometry("500x600")
+        d.transient(self)
+        d.grab_set()
+
+        # Target Host/Port
+        ttk.Label(d, text="Target GDB Server Info (as seen from Remote Host):", font=("", 10, "bold")).pack(pady=(15, 5))
+        
+        host_frame = ttk.Frame(d)
+        host_frame.pack(fill=tk.X, padx=40)
+        ttk.Label(host_frame, text="Host:").pack(side=tk.LEFT)
+        host_var = tk.StringVar(value="127.0.0.1")
+        ttk.Entry(host_frame, textvariable=host_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+        port_frame = ttk.Frame(d)
+        port_frame.pack(fill=tk.X, padx=40, pady=5)
+        ttk.Label(port_frame, text="Port:").pack(side=tk.LEFT)
+        port_var = tk.StringVar(value="3333")
+        ttk.Entry(port_frame, textvariable=port_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+        # Architecture
+        ttk.Label(d, text="Target Architecture:").pack(pady=(5, 0))
+        arch_list = [
+            "arm", "armv7e-m", "armv7-m", "armv6-m", "armv8-m.main", "armv8-m.base",
+            "i386", "i386:x86-64", "mips", "powerpc", "riscv", "auto"
+        ]
+        arch_display = {
+            "i386": "x86 (i386)",
+            "i386:x86-64": "x86_64",
+            "arm": "ARM (generic)",
+            "armv7e-m": "ARM Cortex-M4/M7 (armv7e-m)",
+            "armv7-m": "ARM Cortex-M3 (armv7-m)",
+            "armv6-m": "ARM Cortex-M0 (armv6-m)",
+            "armv8-m.main": "ARM Cortex-M33 (armv8-m.main)",
+            "armv8-m.base": "ARM Cortex-M23 (armv8-m.base)",
+            "mips": "MIPS",
+            "powerpc": "PowerPC",
+            "riscv": "RISC-V",
+            "auto": "Auto-detect"
+        }
+        display_list = [arch_display.get(a, a) for a in arch_list]
+        selected_display = tk.StringVar(value=arch_display.get(self.gdb_architecture.get(), self.gdb_architecture.get()))
+
+        combo = ttk.Combobox(d, textvariable=selected_display, values=display_list, state="readonly")
+        combo.pack(fill=tk.X, padx=40, pady=5)
+
+        # SSH Tunneling section
+        ttk.Separator(d, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=20, pady=15)
+        
+        use_ssh_var = tk.BooleanVar(value=False)
+        ssh_check = ttk.Checkbutton(d, text="Use SSH Tunnel", variable=use_ssh_var)
+        ssh_check.pack()
+
+        ssh_frame = ttk.LabelFrame(d, text="SSH Tunnel Settings")
+        ssh_frame.pack(fill=tk.X, padx=40, pady=10)
+
+        # SSH Host
+        ttk.Label(ssh_frame, text="SSH Host:").pack(padx=5)
+        ssh_host_var = tk.StringVar(value="192.168.0.120")
+        ttk.Entry(ssh_frame, textvariable=ssh_host_var).pack(fill=tk.X, padx=5, pady=2)
+
+        # SSH User
+        ttk.Label(ssh_frame, text="SSH User:").pack(padx=5)
+        ssh_user_var = tk.StringVar(value=getpass.getuser())
+        ttk.Entry(ssh_frame, textvariable=ssh_user_var).pack(fill=tk.X, padx=5, pady=2)
+
+        # SSH Key
+        ttk.Label(ssh_frame, text="SSH Identity (Optional):").pack(padx=5)
+        ssh_key_var = tk.StringVar(value="")
+        key_entry_frame = ttk.Frame(ssh_frame)
+        key_entry_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Entry(key_entry_frame, textvariable=ssh_key_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        def browse_key():
+            fn = filedialog.askopenfilename(title="Select SSH Key", initialdir=os.path.expanduser("~/.ssh"))
+            if fn: ssh_key_var.set(fn)
+        
+        ttk.Button(key_entry_frame, text="...", width=3, command=browse_key).pack(side=tk.LEFT)
+
+        def on_connect():
+            host = host_var.get().strip()
+            port = port_var.get().strip()
+            display_val = selected_display.get()
+
+            if not host or not port:
+                return
+
+            final_arch = "auto"
+            for k, v in arch_display.items():
+                if v == display_val:
+                    final_arch = k
+                    break
+
+            self.gdb_architecture.set(final_arch)
+
+            # Switch GDB executable if needed
+            is_x86 = final_arch.startswith('i386')
+            current_gdb = self.gdb.gdb_path
+            target_gdb = None
+            if is_x86:
+                if SYSTEM_GDB and "arm" not in os.path.basename(SYSTEM_GDB).lower():
+                    target_gdb = SYSTEM_GDB
+                else:
+                    self.log("Warning: No suitable x86 GDB found, using current.", "error")
+            else:
+                target_gdb = ARM_GDB_PATH
+
+            if target_gdb and target_gdb != current_gdb:
+                self.log(f"Switching GDB to {target_gdb} for architecture {final_arch}")
+                self.gdb.restart_with_path(target_gdb)
+
+            # SSH Tunnel logic
+            if self.ssh_tunnel_process:
+                try:
+                    self.ssh_tunnel_process.terminate()
+                except Exception:
+                    pass
+                self.ssh_tunnel_process = None
+
+            address = f"{host}:{port}"
+            if use_ssh_var.get():
+                ssh_host = ssh_host_var.get().strip()
+                ssh_user = ssh_user_var.get().strip()
+                ssh_key = ssh_key_var.get().strip()
+
+                if not ssh_host or not ssh_user:
+                    messagebox.showerror("SSH Error", "SSH Host and User are required for tunneling.")
+                    return
+
+                # Pick a random free local port for tunneling
+                import socket
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('', 0))
+                    local_port = s.getsockname()[1]
+
+                ssh_cmd = ["ssh", "-N", "-L", f"{local_port}:{host}:{port}", f"{ssh_user}@{ssh_host}"]
+                # Fix for "Too many authentication failures" - only use the specified key if provided, or only keys from agent
+                ssh_cmd.extend(["-o", "IdentitiesOnly=yes"])
+                if ssh_key:
+                    ssh_cmd.extend(["-i", ssh_key])
+                
+                self.log(f"Starting SSH tunnel: {' '.join(ssh_cmd)}")
+                try:
+                    self.ssh_tunnel_process = subprocess.Popen(ssh_cmd)
+                    address = f"127.0.0.1:{local_port}"
+                    # Wait a bit for the tunnel to establish
+                    self.log(f"Waiting for SSH tunnel to establish on localhost:{local_port}...")
+                    d.after(1000, lambda: self._finish_connect(d, address))
+                    return
+                except Exception as e:
+                    self.log(f"Failed to start SSH tunnel: {e}", "error")
+                    messagebox.showerror("SSH Error", f"Failed to start SSH tunnel: {e}")
+                    return
+
+            self._finish_connect(d, address)
+
+        def on_cancel():
+            d.destroy()
+
+        btn_frame = ttk.Frame(d)
+        btn_frame.pack(pady=20)
+        ttk.Button(btn_frame, text="Connect", command=on_connect).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        # Center dialog
+        d.update_idletasks()
+        x = (d.winfo_screenwidth() // 2) - (d.winfo_width() // 2)
+        y = (d.winfo_screenheight() // 2) - (d.winfo_height() // 2)
+        d.geometry(f'+{x}+{y}')
+
+        self.wait_window(d)
+
+    def _finish_connect(self, dialog, address):
+        """Finalize the connection after potential tunnel setup."""
+        if dialog.winfo_exists():
+            dialog.destroy()
+        self.connect_target(address)
 
     def _prompt_arch_and_connect(self, address):
         """Show a dialog to select the architecture before connecting."""
@@ -2455,6 +2720,12 @@ class OzonePy(tk.Tk):
 
     def disconnect_target(self):
         self.gdb.send_command("-target-detach")
+        if self.ssh_tunnel_process:
+            try:
+                self.ssh_tunnel_process.terminate()
+            except Exception:
+                pass
+            self.ssh_tunnel_process = None
         self.target_connected = False
         self.gdb.target_connected = False
         self._update_ui_for_execution_state(False)
@@ -4245,11 +4516,12 @@ class OzonePy(tk.Tk):
             self.gdb.stop()
 
         # Capture processes to stop
-        procs = [self.jlink_process, self.openocd_process, self.stlink_process]
+        procs = [self.jlink_process, self.openocd_process, self.stlink_process, self.ssh_tunnel_process]
         # Clear references to avoid race conditions in reader threads
         self.jlink_process = None
         self.openocd_process = None
         self.stlink_process = None
+        self.ssh_tunnel_process = None
 
         for process in procs:
             if process:

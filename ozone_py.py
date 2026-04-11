@@ -11,6 +11,7 @@ import socket
 import subprocess
 import json
 import time
+from tkinter import font
 from gdb_backend import GdbBackend
 
 if os.name == 'nt':
@@ -96,6 +97,130 @@ class ConnectionProgress:
     def close(self):
         if hasattr(self, 'top') and self.top and self.top.winfo_exists():
             self.top.destroy()
+
+class SearchableListDialog:
+    def __init__(self, parent, title, items, callback, placeholder="Search..."):
+        self.top = tk.Toplevel(parent)
+        self.top.title(title)
+        self.top.geometry("600x400")
+        self.top.transient(parent)
+        self.top.grab_set()
+
+        self.callback = callback
+        self.all_items = items
+        self.filtered_items = items
+
+        # Center the dialog
+        parent.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - 300
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - 200
+        self.top.geometry(f"+{x}+{y}")
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self._on_search_change)
+
+        search_frame = ttk.Frame(self.top, padding=5)
+        search_frame.pack(fill=tk.X)
+        
+        ttk.Label(search_frame, text="Filter:").pack(side=tk.LEFT)
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.search_entry.focus_set()
+
+        list_frame = ttk.Frame(self.top, padding=5)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.tree = ttk.Treeview(list_frame, columns=("display",), show="tree", selectmode="browse")
+        self.tree.column("#0", width=0, stretch=tk.NO)
+        self.tree.column("display", width=580)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.bind("<Double-1>", self._on_select)
+        self.tree.bind("<Return>", self._on_select)
+        self.top.bind("<Escape>", lambda e: self.top.destroy())
+        self.search_entry.bind("<Down>", lambda e: self.tree.focus_set())
+
+        self._update_list()
+
+    def _on_search_change(self, *args):
+        search_term = self.search_var.get().lower()
+        if not search_term:
+            self.filtered_items = self.all_items
+        else:
+            scored_items = []
+            for item in self.all_items:
+                display = item if isinstance(item, str) else item[0]
+                score = self._fuzzy_match_score(search_term, display.lower())
+                if score > 0:
+                    scored_items.append((score, item))
+            
+            # Sort by score (descending)
+            scored_items.sort(key=lambda x: x[0], reverse=True)
+            self.filtered_items = [item for score, item in scored_items]
+        self._update_list()
+
+    def _fuzzy_match_score(self, term, text):
+        if not term: return 1.0
+        if term == text: return 100.0
+        
+        # Exact prefix match is very good
+        if text.startswith(term): return 90.0
+        
+        # Check if all characters are present in order
+        it = iter(text)
+        if not all(c in it for c in term):
+            return 0.0
+
+        # Scoring based on distance and start of words
+        score = 10.0
+        
+        # Bonus for matching at the start of any path component (e.g. filename after /)
+        if f"/{term}" in text or f"\\{term}" in text:
+            score += 40.0
+        
+        # Or if the filename itself starts with the term
+        filename = os.path.basename(text)
+        if filename.startswith(term):
+            score += 35.0
+            
+        # Bonus for each character that matches after a separator or capital letter
+        # For simplicity, let's just use some common separators
+        separators = ['_', '.', '-', '/', '\\']
+        
+        # Find the indices of term characters in text
+        start_pos = text.find(term[0])
+        if start_pos == 0:
+            score += 20.0
+        elif start_pos != -1 and text[start_pos-1] in separators:
+            score += 15.0
+            
+        # Penalize for length of text (shorter matches are better)
+        score -= len(text) * 0.1
+        
+        return max(1.0, score)
+
+    def _update_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for item in self.filtered_items:
+            display = item if isinstance(item, str) else item[0]
+            self.tree.insert("", tk.END, values=(display,))
+        
+        if self.filtered_items:
+            first_item = self.tree.get_children()[0]
+            self.tree.selection_set(first_item)
+
+    def _on_select(self, event=None):
+        selection = self.tree.selection()
+        if selection:
+            idx = self.tree.index(selection[0])
+            if 0 <= idx < len(self.filtered_items):
+                self.callback(self.filtered_items[idx])
+                self.top.destroy()
 
 class OzonePy(tk.Tk):
     def __init__(self):
@@ -202,12 +327,49 @@ class OzonePy(tk.Tk):
         self.debug_log_text = None
         self.debug_window = None
 
-        # Color settings
+        # Color and Font settings
         self.color_comments = tk.StringVar(value="#008000") # Green
         self.color_code_fg = tk.StringVar(value="#000000")  # Black
         self.color_code_bg = tk.StringVar(value="#ffffff")  # White
         self.color_breakpoint = tk.StringVar(value="#ffcccc") # Light red
         self.color_current_line = tk.StringVar(value="#add8e6") # Light blue
+        self.color_line_numbers_fg = tk.StringVar(value="#808080") # Gray
+        self.color_line_numbers_bg = tk.StringVar(value="#e0e0e0") # Light gray
+        self.color_italic_vars = tk.StringVar(value="#808080") # Gray
+
+        # Font selection defaults
+        available_fonts = font.families()
+        default_family = "Consolas"
+        if default_family not in available_fonts:
+            for f in ["Cascadia Code", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Monospace"]:
+                if f in available_fonts:
+                    default_family = f
+                    break
+        default_size = 10
+
+        # Individual category fonts
+        self.font_family_code = tk.StringVar(value=default_family)
+        self.font_size_code = tk.IntVar(value=default_size)
+        
+        self.font_family_line_numbers = tk.StringVar(value=default_family)
+        self.font_size_line_numbers = tk.IntVar(value=default_size)
+        
+        self.font_family_comments = tk.StringVar(value=default_family)
+        self.font_size_comments = tk.IntVar(value=default_size)
+        
+        self.font_family_italics = tk.StringVar(value=default_family)
+        self.font_size_italics = tk.IntVar(value=default_size)
+
+        self.mono_font_family = default_family
+        self.mono_font_size = default_size
+
+        # We keep separate Font objects for different styles to ensure consistency and correct metrics
+        self.mono_font = font.Font(family=self.font_family_code.get(), size=self.font_size_code.get())
+        self.mono_font_italic = font.Font(family=self.font_family_italics.get(), size=self.font_size_italics.get(), slant="italic")
+        self.mono_font_bold = font.Font(family=self.font_family_code.get(), size=self.font_size_code.get(), weight="bold")
+        self.mono_font_comments = font.Font(family=self.font_family_comments.get(), size=self.font_size_comments.get())
+        self.mono_font_line_numbers = font.Font(family=self.font_family_line_numbers.get(), size=self.font_size_line_numbers.get())
+
         self.show_inline_vars = tk.BooleanVar(value=True)
         self.coverage_enabled = tk.BooleanVar(value=False)
         self.all_functions = [] # List of strings: ["func1", "func2", ...]
@@ -324,7 +486,7 @@ class OzonePy(tk.Tk):
         file_menu.add_command(label="Load J-Link Script...", command=self.load_jlink_script)
         file_menu.add_command(label="OpenOCD Server Settings...", command=self.set_openocd_settings)
         file_menu.add_command(label="ST-LINK Server Settings...", command=self.set_stlink_settings)
-        file_menu.add_command(label="Color Settings...", command=self.set_colors)
+        file_menu.add_command(label="Appearance Settings...", command=self.set_appearance)
         file_menu.add_command(label="Show Debug Log", command=self.show_debug_log)
 
         file_menu.add_checkbutton(label="Enable Code Coverage", variable=self.coverage_enabled, command=self._on_toggle_coverage)
@@ -424,27 +586,29 @@ class OzonePy(tk.Tk):
         source_container = ttk.Frame(self.upper_pw)
         self.upper_pw.add(source_container, weight=3)
 
-        self.line_numbers = tk.Text(source_container, width=4, padx=5, pady=5, takefocus=0, border=0,
-                                   highlightthickness=0, background='#e0e0e0', state='disabled', wrap='none',
-                                   font=('Consolas', 10), spacing1=0, spacing2=0, spacing3=0)
+        self.line_numbers = tk.Text(source_container, width=5, padx=5, pady=5, takefocus=0, border=0,
+                                   highlightthickness=0, background=self.color_line_numbers_bg.get(),
+                                   foreground=self.color_line_numbers_fg.get(),
+                                   state='disabled', wrap='none',
+                                   font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
         self.line_numbers.pack(side=tk.LEFT, fill=tk.Y)
 
         self.source_text = tk.Text(source_container, wrap=tk.NONE, undo=False,
                                    foreground=self.color_code_fg.get(), background=self.color_code_bg.get(),
-                                   font=('Consolas', 10), borderwidth=0, highlightthickness=0, padx=5, pady=5,
-                                   spacing1=0, spacing2=0, spacing3=0)
+                                   font=self.mono_font, borderwidth=0, highlightthickness=0, padx=5, pady=5,
+                                   spacing1=1, spacing2=0, spacing3=0)
         self.source_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.source_text.tag_configure("breakpoint", background=self.color_breakpoint.get(), spacing1=0, spacing2=0, spacing3=0)
-        self.source_text.tag_configure("hit_breakpoint", background=self.color_current_line.get(), spacing1=0, spacing2=0, spacing3=0)
-        self.source_text.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
-        self.source_text.tag_configure("comment", foreground=self.color_comments.get(), spacing1=0, spacing2=0, spacing3=0)
-        self.source_text.tag_configure("inline_var", foreground="gray", font=("Consolas", 10, "italic"), spacing1=0, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("breakpoint", background=self.color_breakpoint.get(), font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("hit_breakpoint", background=self.color_current_line.get(), font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("comment", foreground=self.color_comments.get(), font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.source_text.tag_configure("inline_var", foreground=self.color_italic_vars.get(), font=self.mono_font_italic, spacing1=1, spacing2=0, spacing3=0)
 
-        self.line_numbers.tag_configure("breakpoint", background=self.color_breakpoint.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
-        self.line_numbers.tag_configure("hit_breakpoint", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
-        self.line_numbers.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", spacing1=0, spacing2=0, spacing3=0)
-        self.line_numbers.tag_configure("inline_var_padding", font=("Consolas", 10, "italic"), spacing1=0, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("breakpoint", background=self.color_breakpoint.get(), foreground="black", font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("hit_breakpoint", background=self.color_current_line.get(), foreground="black", font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("current_line", background=self.color_current_line.get(), foreground="black", font=self.mono_font, spacing1=1, spacing2=0, spacing3=0)
+        self.line_numbers.tag_configure("inline_var_padding", font=self.mono_font_italic, spacing1=1, spacing2=0, spacing3=0)
 
         self.src_scroll = ttk.Scrollbar(source_container, command=self._on_scroll)
         self.src_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -636,6 +800,8 @@ class OzonePy(tk.Tk):
         self.bp_menu.add_command(label="Delete All Breakpoints", command=self.delete_all_breakpoints)
 
         self.source_menu = tk.Menu(self, tearoff=0)
+        self.source_menu.add_command(label="Go to Definition", command=self.go_to_definition)
+        self.source_menu.add_separator()
         self.source_menu.add_command(label="Add to Watch", command=self._add_selection_to_watch)
         self.source_menu.add_command(label="Add to Live Watch", command=self._add_selection_to_live_watch)
         self.source_menu.add_separator()
@@ -671,6 +837,10 @@ class OzonePy(tk.Tk):
         self.bind("<F9>", lambda e: self.stop_debug())
         self.bind("<F7>", lambda e: self.step())
         self.bind("<F8>", lambda e: self.step_over())
+        self.bind("<Control-p>", lambda e: self.show_quick_open())
+        self.bind("<Control-P>", lambda e: self.show_quick_open())
+        self.bind("<Control-Shift-F>", lambda e: self.show_global_symbol_search())
+        self.bind("<Control-Shift-f>", lambda e: self.show_global_symbol_search())
 
     def _show_selected_bp_properties(self):
         selected_item = self.bp_tree.selection()
@@ -797,9 +967,18 @@ class OzonePy(tk.Tk):
         self.live_watch_timer_id = self.after(interval, self._update_live_watches)
 
     def _update_live_watches(self):
+        # Cancel any pending timer to avoid multiple loops
+        if self.live_watch_timer_id is not None:
+            self.after_cancel(self.live_watch_timer_id)
+            self.live_watch_timer_id = None
+
         if self.target_connected and self.live_watches:
             start_time = time.time()
             def update_callback(result_class, rest):
+                # Ensure we are still in a valid state
+                if not hasattr(self, 'live_watch_status') or not self.live_watch_status.winfo_exists():
+                    return
+
                 if result_class == "^done":
                     # GDB MI -var-update output can be:
                     # changelist=[{name="var1",value="1",in_scope="true",type_changed="false",has_more="0"},...]
@@ -827,20 +1006,28 @@ class OzonePy(tk.Tk):
                         interval = int(self.live_watch_update_interval.get())
                     except:
                         interval = 1000
-                    self.live_watch_status.config(text=f"Live Watch: Updated in {elapsed:.1f}ms (Rate: {interval}ms)")
+                    
+                    try:
+                        self.live_watch_status.config(text=f"Live Watch: Updated in {elapsed:.1f}ms (Rate: {interval}ms)")
+                    except Exception as e:
+                        self.debug_log(f"Error updating live watch status: {e}", "error")
                 else:
                     self.debug_log(f"Live watch update failed: {result_class} {rest}", "error")
-                    self.live_watch_status.config(text=f"Live Watch: Error ({result_class})")
+                    try:
+                        self.live_watch_status.config(text=f"Live Watch: Error ({result_class})")
+                    except:
+                        pass
 
                 # Re-schedule after processing
                 self._schedule_live_watch_update()
 
             self.gdb.send_command("-var-update --all-values *", update_callback)
         else:
-            if not self.target_connected:
-                self.live_watch_status.config(text="Live Watch: Not connected")
-            elif not self.live_watches:
-                self.live_watch_status.config(text="Live Watch: No variables")
+            if hasattr(self, 'live_watch_status') and self.live_watch_status.winfo_exists():
+                if not self.target_connected:
+                    self.live_watch_status.config(text="Live Watch: Not connected")
+                elif not self.live_watches:
+                    self.live_watch_status.config(text="Live Watch: No variables")
             self._schedule_live_watch_update()
 
     def _update_live_watches_for_step(self):
@@ -912,8 +1099,17 @@ class OzonePy(tk.Tk):
                 processed_any = True
                 resp_type, *data = resp
                 if resp_type == 'console':
-                    self.log(data[0])
                     msg = data[0]
+                    self.log(msg)
+                    
+                    # Try to parse 'info line' response for Go to Definition
+                    if hasattr(self, '_waiting_for_info_line') and self._waiting_for_info_line:
+                        if self._on_info_line_response_v2(msg):
+                            self._waiting_for_info_line = False
+                            self._waiting_for_info_funcs = False
+                            self._waiting_for_info_vars = False
+                            self._symbol_search_list = [] # Temporary list for global search fallback
+
                     if hasattr(self, 'download_progress') and self.download_progress:
                         if "Loading section" in msg:
                             self.download_progress.update(self.download_progress.progress['value'], msg.strip())
@@ -926,8 +1122,14 @@ class OzonePy(tk.Tk):
                                 if total > 0:
                                     percent = (sent * 100) // total
                                     self.download_progress.update(percent)
+                    
+                    if hasattr(self, '_waiting_for_info_funcs') and self._waiting_for_info_funcs:
+                        self._process_console_for_symbol_search(msg)
+                    if hasattr(self, '_waiting_for_info_vars') and self._waiting_for_info_vars:
+                        self._process_console_for_symbol_search(msg)
+
                     if hasattr(self, 'collecting_functions') and self.collecting_functions:
-                        self._process_console_for_functions(data[0])
+                        self._process_console_for_functions(msg)
                     if "unknown architecture \"arm\"" in data[0]:
                         self._show_arch_warning()
                 elif resp_type == 'log':
@@ -968,7 +1170,10 @@ class OzonePy(tk.Tk):
                     if data[1] == "^connected":
                         self.target_connected = True
                         if hasattr(self, 'status_bar') and self.status_bar.winfo_exists():
-                            self.status_bar.config(text="Connected to target", foreground="green")
+                            try:
+                                self.status_bar.config(text="Connected to target", foreground="green")
+                            except:
+                                pass
                         self.log("Connected successfully.")
                 elif resp_type == 'mi-send':
                     self.debug_log(f"MI SEND: {data[0]}", "mi-send")
@@ -1700,42 +1905,60 @@ class OzonePy(tk.Tk):
                             post_connect_cmd=post_cmd,
                             progress=progress)
 
-    def set_colors(self):
+    def set_appearance(self):
         from tkinter import colorchooser
         d = tk.Toplevel(self)
-        d.title("Color Settings")
-        d.geometry("350x300")
+        d.title("Appearance Settings")
+        d.geometry("500x700")
+        d.transient(self)
+        d.grab_set()
 
         def choose_color(var, tag_name=None, is_bg=False, is_text_attr=False):
             color = colorchooser.askcolor(initialcolor=var.get(), title=f"Choose Color")[1]
             if color:
                 var.set(color)
                 if tag_name:
-                    if is_bg:
-                        self.source_text.tag_configure(tag_name, background=color)
-                        self.line_numbers.tag_configure(tag_name, background=color)
-                    else:
-                        self.source_text.tag_configure(tag_name, foreground=color)
-                if is_text_attr:
                     if tag_name == "source_fg":
                         self.source_text.config(foreground=color)
                     elif tag_name == "source_bg":
                         self.source_text.config(background=color)
+                    elif tag_name == "line_numbers_fg":
+                        self.line_numbers.config(foreground=color)
+                    elif tag_name == "line_numbers_bg":
+                        self.line_numbers.config(background=color)
+                    elif tag_name == "inline_var":
+                        self.source_text.tag_configure("inline_var", foreground=color)
+                    elif tag_name == "comment":
+                        self.source_text.tag_configure("comment", foreground=color)
+                    elif tag_name == "breakpoint":
+                        self.source_text.tag_configure("breakpoint", background=color)
+                        self.line_numbers.tag_configure("breakpoint", background=color)
+                    elif tag_name == "current_line":
+                        self.source_text.tag_configure("current_line", background=color)
+                        self.line_numbers.tag_configure("current_line", background=color)
                 self._refresh_source_tags()
+
+        # --- Colors Section ---
+        ttk.Label(d, text="Colors", font=("", 10, "bold")).pack(pady=5)
+        color_frame = ttk.Frame(d)
+        color_frame.pack(fill=tk.BOTH, expand=False, padx=10)
 
         rows = [
             ("Comments:", self.color_comments, "comment", False, False),
             ("Code Foreground:", self.color_code_fg, "source_fg", False, True),
             ("Code Background:", self.color_code_bg, "source_bg", True, True),
+            ("Line Numbers FG:", self.color_line_numbers_fg, "line_numbers_fg", False, True),
+            ("Line Numbers BG:", self.color_line_numbers_bg, "line_numbers_bg", True, True),
+            ("Italic Vars:", self.color_italic_vars, "inline_var", False, False),
             ("Breakpoints:", self.color_breakpoint, "breakpoint", True, False),
             ("Current Line:", self.color_current_line, "current_line", True, False),
         ]
 
         for label, var, tag, is_bg, is_attr in rows:
-            f = ttk.Frame(d)
-            f.pack(fill=tk.X, padx=10, pady=5)
+            f = ttk.Frame(color_frame)
+            f.pack(fill=tk.X, pady=1)
             ttk.Label(f, text=label, width=20).pack(side=tk.LEFT)
-            sample = tk.Frame(f, width=20, height=20, background=var.get(), relief=tk.RAISED, borderwidth=1)
+            sample = tk.Frame(f, width=15, height=15, background=var.get(), relief=tk.RAISED, borderwidth=1)
             sample.pack(side=tk.LEFT, padx=5)
 
             def make_cmd(v=var, t=tag, b=is_bg, a=is_attr, s=sample):
@@ -1744,7 +1967,70 @@ class OzonePy(tk.Tk):
 
             ttk.Button(f, text="Set", width=5, command=make_cmd).pack(side=tk.RIGHT)
 
-        ttk.Button(d, text="Close", command=d.destroy).pack(pady=10)
+        # --- Fonts Section ---
+        ttk.Separator(d, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Label(d, text="Fonts", font=("", 10, "bold")).pack(pady=5)
+        
+        font_main_frame = ttk.Frame(d)
+        font_main_frame.pack(fill=tk.BOTH, expand=True, padx=10)
+
+        font_families = sorted(list(set(f for f in font.families() if f)))
+
+        font_rows = [
+            ("Normal Code:", self.font_family_code, self.font_size_code),
+            ("Comments:", self.font_family_comments, self.font_size_comments),
+            ("Italics:", self.font_family_italics, self.font_size_italics),
+            ("Line Numbers:", self.font_family_line_numbers, self.font_size_line_numbers),
+        ]
+
+        for i, (label, fam_var, size_var) in enumerate(font_rows):
+            ttk.Label(font_main_frame, text=label, font=("", 9, "bold")).grid(row=i*2, column=0, sticky=tk.W, pady=(5, 0))
+            
+            f_row = ttk.Frame(font_main_frame)
+            f_row.grid(row=i*2+1, column=0, columnspan=2, sticky=tk.EW)
+            
+            ttk.Label(f_row, text="Family:").pack(side=tk.LEFT)
+            cb = ttk.Combobox(f_row, textvariable=fam_var, values=font_families, state="readonly", width=25)
+            cb.pack(side=tk.LEFT, padx=5)
+            
+            ttk.Label(f_row, text="Size:").pack(side=tk.LEFT)
+            sb = ttk.Spinbox(f_row, from_=6, to=72, textvariable=size_var, width=5)
+            sb.pack(side=tk.LEFT, padx=5)
+
+        def apply_fonts():
+            # Update Font objects
+            self.mono_font.config(family=self.font_family_code.get(), size=self.font_size_code.get())
+            self.mono_font_bold.config(family=self.font_family_code.get(), size=self.font_size_code.get(), weight="bold")
+            
+            self.mono_font_comments.config(family=self.font_family_comments.get(), size=self.font_size_comments.get())
+            self.mono_font_italic.config(family=self.font_family_italics.get(), size=self.font_size_italics.get(), slant="italic")
+            self.mono_font_line_numbers.config(family=self.font_family_line_numbers.get(), size=self.font_size_line_numbers.get())
+            
+            # Re-apply font to tags
+            self.source_text.tag_configure("comment", font=self.mono_font_comments)
+            self.source_text.tag_configure("breakpoint", font=self.mono_font)
+            self.source_text.tag_configure("hit_breakpoint", font=self.mono_font)
+            self.source_text.tag_configure("current_line", font=self.mono_font)
+            self.source_text.tag_configure("inline_var", font=self.mono_font_italic)
+            
+            self.line_numbers.tag_configure("comment", font=self.mono_font_comments)
+            self.line_numbers.tag_configure("breakpoint", font=self.mono_font_line_numbers)
+            self.line_numbers.tag_configure("hit_breakpoint", font=self.mono_font_line_numbers)
+            self.line_numbers.tag_configure("current_line", font=self.mono_font_line_numbers)
+            self.line_numbers.tag_configure("inline_var_padding", font=self.mono_font_italic)
+            
+            # Update base widget fonts
+            self.source_text.config(font=self.mono_font)
+            self.line_numbers.config(font=self.mono_font_line_numbers)
+            
+            # Update global defaults for any other potential use
+            self.mono_font_family = self.font_family_code.get()
+            self.mono_font_size = self.font_size_code.get()
+
+            self._refresh_source_tags()
+
+        ttk.Button(d, text="Apply Fonts", command=apply_fonts).pack(pady=10)
+        ttk.Button(d, text="Close", command=d.destroy).pack(pady=5)
 
     def _show_error(self, title, message):
         dialog = tk.Toplevel(self)
@@ -2759,11 +3045,16 @@ class OzonePy(tk.Tk):
     def _on_scroll(self, *args):
         self.source_text.yview(*args)
         self.line_numbers.yview(*args)
-        # Ensure they are perfectly in sync by forcing the same yview
+        # Force sync by index
         self.line_numbers.yview_moveto(self.source_text.yview()[0])
 
     def _on_source_scroll_update(self, *args):
-        self.line_numbers.yview_moveto(args[0])
+        if hasattr(self, 'line_numbers'):
+            self.line_numbers.yview_moveto(args[0])
+            # Force exact sync
+            current_src_top = self.source_text.yview()[0]
+            if self.line_numbers.yview()[0] != current_src_top:
+                self.line_numbers.yview_moveto(current_src_top)
         if hasattr(self, 'src_scroll'):
             self.src_scroll.set(*args)
 
@@ -3036,6 +3327,9 @@ class OzonePy(tk.Tk):
                 self.line_numbers.tag_add(tag_name, f"{bp['line']}.0", f"{bp['line']}.end")
                 # Add italic padding to line numbers if current line has italic inline vars to keep heights matched
                 if self.show_inline_vars.get():
+                    # Check if there are any inline variables on this line
+                    # In _refresh_source_tags we don't easily know, so we apply it if show_inline_vars is on
+                    # as a safe default for alignment.
                     self.line_numbers.tag_add("inline_var_padding", f"{bp['line']}.0", f"{bp['line']}.end")
 
         # Finally, if there's a current line that was not marked as hit_breakpoint
@@ -3487,6 +3781,140 @@ class OzonePy(tk.Tk):
         parent_id = tree.parent(item_id)
         if parent_id:
             messagebox.showinfo("Delete Watch", "To delete a member, delete the parent structure.")
+
+    def show_quick_open(self):
+        if not self.source_files:
+            self._request_source_files()
+            messagebox.showinfo("Quick Open", "Requesting source files from GDB, please try again in a moment.")
+            return
+
+        items = [(os.path.basename(f), f) for f in self.source_files]
+        SearchableListDialog(self, "Quick Open (Ctrl+P)", items, lambda item: self._update_source_view(item[1], 0))
+
+    def show_global_symbol_search(self):
+        self.log("Fetching global symbols...")
+        symbols = []
+        
+        def on_symbols_fetched():
+            # Merge fallback symbols if any
+            if hasattr(self, '_symbol_search_list') and self._symbol_search_list:
+                symbols.extend(self._symbol_search_list)
+                self._symbol_search_list = []
+                self._waiting_for_info_funcs = False
+                self._waiting_for_info_vars = False
+
+            if not symbols:
+                messagebox.showinfo("Global Symbol Search", "No symbols found or GDB not ready.")
+                return
+            
+            # Remove duplicates and sort
+            unique_symbols = sorted(list(set(symbols)))
+            # Items for dialog: (display_name, symbol_name)
+            dialog_items = [(s, s) for s in unique_symbols]
+            
+            SearchableListDialog(self, "Global Symbol Search (Ctrl+Shift+F)", dialog_items, 
+                               lambda item: self._jump_to_symbol(item[1]))
+
+        def fetch_variables_fallback():
+            self._waiting_for_info_vars = True
+            self.gdb.send_command("info variables")
+            # We'll wait a bit and then show the dialog, or rely on console output parsing.
+            # Since we can't easily wait for console output to FINISH in a non-blocking way 
+            # without a complex state machine, let's trigger the dialog after a short delay
+            # or better, use a callback if we can.
+            # Actually, I can use a timer to check if symbols are still coming in.
+            self.after(500, check_if_done)
+
+        def fetch_functions_fallback():
+            self._waiting_for_info_funcs = True
+            self.gdb.send_command("info functions")
+            self.after(500, fetch_variables_fallback)
+
+        def check_if_done():
+            # If we are using fallback, we might still be receiving console messages.
+            # But for now, let's just show what we have.
+            on_symbols_fetched()
+
+        def fetch_variables():
+            def vars_callback(result_class, rest):
+                if result_class == "^error" and "undefined-command" in rest:
+                    fetch_variables_fallback()
+                else:
+                    self._parse_mi_symbols(result_class, rest, symbols, fetch_done_callback=on_symbols_fetched)
+            
+            self.gdb.send_command("-symbol-list-variables", vars_callback)
+
+        def fetch_functions():
+            def funcs_callback(result_class, rest):
+                if result_class == "^error" and "undefined-command" in rest:
+                    fetch_functions_fallback()
+                else:
+                    self._parse_mi_symbols(result_class, rest, symbols, next_step=fetch_variables)
+
+            self.gdb.send_command("-symbol-list-functions", funcs_callback)
+
+        fetch_functions()
+
+    def _parse_mi_symbols(self, result_class, rest, symbol_list, next_step=None, fetch_done_callback=None):
+        if result_class == "^done" and "symbols=" in rest:
+            # Simple parsing for MI symbols: symbols=[{name="...",...},{name="...",...}]
+            # Find the symbols list part
+            match = re.search(r'symbols=\[(.*)\]', rest)
+            if match:
+                symbols_part = match.group(1)
+                # Find all name="..." fields
+                names = re.findall(r'name="([^"]+)"', symbols_part)
+                for name in names:
+                    symbol_list.append(name)
+        
+        if next_step:
+            next_step()
+        elif fetch_done_callback:
+            fetch_done_callback()
+
+    def _jump_to_symbol(self, symbol_name):
+        self.log(f"Jumping to symbol {symbol_name}...")
+        self._waiting_for_info_line = True
+        self.gdb.send_command(f"info line {symbol_name}")
+
+    def _parse_info_line_cli(self, result_class, rest):
+        pass
+
+    def go_to_definition(self):
+        try:
+            selection = self.source_text.get("sel.first", "sel.last").strip()
+            if not selection:
+                return
+            
+            # Clean selection
+            symbol = re.sub(r'^[^\w*]+|[^\w]+$', '', selection)
+            if not symbol:
+                return
+
+            self.log(f"Searching for definition of '{symbol}'...")
+            self._waiting_for_info_line = True
+            # We don't need a callback here because _poll_gdb_responses will catch the console output
+            self.gdb.send_command(f"info line {symbol}")
+
+        except tk.TclError:
+            pass
+
+    def _on_info_line_response(self, result_class, rest):
+        pass
+
+    # Improved version using -symbol-info-functions/variables if available (GDB 9+)
+    # or just 'info line' and parsing the response.
+    # Let's implement a better parser for 'info line' output.
+
+    def _on_info_line_response_v2(self, text):
+        # "Line 123 of \"file.c\" starts at address ..."
+        match = re.search(r'Line (\d+) of "([^"]+)"', text)
+        if match:
+            line = int(match.group(1))
+            file = match.group(2)
+            self._update_source_view(file, line)
+            return True
+        return False
 
     def _on_source_right_click(self, event):
         try:
@@ -4112,8 +4540,10 @@ class OzonePy(tk.Tk):
 
             self.line_numbers.config(state=tk.NORMAL)
             self.line_numbers.delete('1.0', tk.END)
-            for i in range(1, len(lines) + 1):
-                self.line_numbers.insert(tk.END, f"{i}\n")
+            # Create a fixed width string for line numbers to ensure they don't cause horizontal resize issues
+            # though it's already width=4.
+            ln_text = "".join(f"{i}\n" for i in range(1, len(lines) + 1))
+            self.line_numbers.insert(tk.END, ln_text)
             self.line_numbers.config(state=tk.DISABLED)
 
             self.line_numbers.yview_moveto(self.source_text.yview()[0])
@@ -4143,6 +4573,7 @@ class OzonePy(tk.Tk):
     def _apply_syntax_highlighting(self):
         # Simple syntax highlighting for comments
         self.source_text.tag_remove("comment", "1.0", tk.END)
+        self.line_numbers.tag_remove("comment", "1.0", tk.END)
         start = "1.0"
         while True:
             idx = self.source_text.search(r"//", start, stopindex=tk.END, regexp=True)
@@ -4150,6 +4581,9 @@ class OzonePy(tk.Tk):
                 break
             line_end = self.source_text.index(f"{idx} lineend")
             self.source_text.tag_add("comment", idx, line_end)
+            # Apply to line numbers sidebar as well for height matching
+            line_num = idx.split('.')[0]
+            self.line_numbers.tag_add("comment", f"{line_num}.0", f"{line_num}.end")
             start = line_end
 
         # Block comments
@@ -4164,9 +4598,21 @@ class OzonePy(tk.Tk):
             else:
                 end_idx = self.source_text.index(f"{end_idx} + 2 chars")
             self.source_text.tag_add("comment", idx, end_idx)
+            
+            # Apply to line numbers sidebar (multiline)
+            start_line = int(idx.split('.')[0])
+            if end_idx == tk.END:
+                end_line = int(self.source_text.index('end').split('.')[0])
+            else:
+                end_line = int(end_idx.split('.')[0])
+            
+            for ln in range(start_line, end_line + 1):
+                self.line_numbers.tag_add("comment", f"{ln}.0", f"{ln}.end")
+                
             start = end_idx
 
     def _clear_inline_variables(self):
+        self.line_numbers.tag_remove("inline_var_padding", "1.0", tk.END)
         self.source_text.config(state=tk.NORMAL)
         start = "1.0"
         while True:
@@ -4177,6 +4623,8 @@ class OzonePy(tk.Tk):
             self.source_text.delete(idx, line_end)
             start = idx # Next search starts from where we deleted
         self.source_text.config(state=tk.DISABLED)
+        # Also refresh source tags to clear any residual padding tags in line numbers
+        self._refresh_source_tags()
 
     def _update_inline_variables(self):
         if not self.show_inline_vars.get():
@@ -4203,13 +4651,15 @@ class OzonePy(tk.Tk):
         # We only show it for the CURRENT line where we stopped
         pos = f"{line}.end"
         self.source_text.insert(pos, inline_str, "inline_var")
+        self.line_numbers.tag_add("inline_var_padding", f"{line}.0", f"{line}.end")
         self.source_text.config(state=tk.DISABLED)
         self.update() # Force refresh
 
     def _on_toggle_inline_vars(self):
         if not self.show_inline_vars.get():
             self._clear_inline_variables()
-        else:
+        self._refresh_source_tags()
+        if self.show_inline_vars.get():
             self._update_inline_variables()
 
     def _on_source_hover(self, event):
@@ -4381,21 +4831,41 @@ class OzonePy(tk.Tk):
             self.enabled_functions = {}
             # The output comes as 'console' type responses in _poll_gdb_responses.
 
+    def _process_console_for_symbol_search(self, text):
+        # Using similar logic to _process_console_for_functions but for the search dialog
+        # Improved regex to handle:
+        # 1. Return types with spaces, underscores, _Bool, const, static
+        # 2. Variable declarations with similar modifiers
+        # 3. Multiple pointer levels
+        
+        # Functions: [line_num]: [type] [symbol]([args]);
+        # We look for the word right before the '('
+        debug_func_matches = re.findall(r'^\d+:\s+.*?\s+([\w\d_]+)\s*\(', text, re.MULTILINE)
+        
+        # Variables: [line_num]: [type] [symbol];
+        # We look for the word right before the ';'
+        debug_var_matches = re.findall(r'^\d+:\s+.*?\s+([\w\d_]+)\s*;', text, re.MULTILINE)
+        
+        # Non-debugging symbols: [address] [symbol]
+        non_debug_matches = re.findall(r'^0x[0-9a-fA-F]+\s+([\w\d_]+)$', text, re.MULTILINE)
+
+        added_any = False
+        for m in debug_func_matches + debug_var_matches + non_debug_matches:
+            if m not in self._symbol_search_list:
+                self._symbol_search_list.append(m)
+                added_any = True
+        
+        if added_any:
+            self._symbol_search_list.sort()
+
     def _process_console_for_functions(self, text):
-        # Look for function names in "File path/to/file.c:\nstatic int func_name(args);\n"
-        # or just "int func_name(args);"
-        # GDB info functions output often has lines like:
-        # File main.c:
-        # 12:	void main(void);
-        # 15:	static int helper(int);
-        # Non-debugging symbols:
-        # 0x08000100  Reset_Handler
-
-        # Regex to match function names in info functions output:
-        # 1. Debug symbols: [line_num]:\t[return_type] [func_name]([args]);
-        # 2. Non-debug symbols: [address]  [func_name]
-
-        debug_matches = re.findall(r'^\d+:\s+[\w\*\s]+?\s+([\w\d_]+)\s*\(', text, re.MULTILINE)
+        # Improved regex to handle:
+        # 1. Return types with spaces, underscores, _Bool, const, static
+        # 2. Multiple pointer levels
+        
+        # Functions: [line_num]: [type] [symbol]([args]);
+        # We look for the word right before the '('
+        debug_matches = re.findall(r'^\d+:\s+.*?\s+([\w\d_]+)\s*\(', text, re.MULTILINE)
         non_debug_matches = re.findall(r'^0x[0-9a-fA-F]+\s+([\w\d_]+)$', text, re.MULTILINE)
 
         found_count = 0

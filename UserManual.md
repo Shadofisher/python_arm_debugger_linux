@@ -55,13 +55,36 @@ OzonePy provides several ways to control the execution of your program:
 
 ---
 
-## 3. Source Code View & Breakpoints
+## 3. Navigation & Search
 
-### 3.1 Navigating Source Files
+OzonePy provides advanced navigation tools to quickly find symbols and files within your project.
+
+### 3.1 Global Symbol Search (Ctrl+Shift+F)
+Search for any function or variable across the entire project (from the ELF symbol table).
+- Press `Ctrl+Shift+F` to open the search dialog.
+- Supports **fuzzy matching** (e.g., `sysinit` matches `system_init`).
+- **Robust Parsing**: Handles complex C/C++ declarations, including `static`, `const`, `volatile`, and multiple pointer levels (e.g., `StaticTask_t **`).
+- Works even if the file is not currently open.
+
+### 3.2 Quick Open (Ctrl+P)
+Rapidly switch between source files associated with the loaded ELF.
+- Press `Ctrl+P` to open the file search dialog.
+- Type any part of the file name or path to filter.
+
+### 3.3 Go to Definition (Right-Click)
+Navigate directly to the implementation of a function or declaration of a variable.
+- Right-click on a symbol in the **Source View** and select **Go to Definition**.
+
+---
+
+## 4. Source Code View & Breakpoints
+
+### 4.1 Navigating Source Files
 - The **Files** tab in the sidebar shows a tree view of all source files. Double-click a file to open it.
 - Use the **Source** dropdown in the toolbar to quickly switch between open files.
+- Use **Quick Open** (`Ctrl+P`) for even faster navigation.
 
-### 3.2 Breakpoints
+### 4.2 Breakpoints
 - **Set/Clear Breakpoint**: Click on the line number in the source view to toggle a breakpoint.
 - **Breakpoint Indicators**:
     - Red line number: Active breakpoint.
@@ -72,37 +95,37 @@ OzonePy provides several ways to control the execution of your program:
     - **Set Dependency**: Make this breakpoint depend on another one being hit first.
     - **Set Ignore Count**: Skip the breakpoint a specified number of times.
 
-### 3.3 Watchpoints (Data Breakpoints)
+### 4.3 Watchpoints (Data Breakpoints)
 - Click `Add Watchpoint` in the Breakpoints tab.
 - Choose between **Write**, **Read**, or **Access** (Read/Write) watchpoints on a memory address or variable.
 
 ---
 
-## 4. Debug Information Windows
+## 5. Debug Information Windows
 
-### 4.1 Watches & Expressions
+### 5.1 Watches & Expressions
 - The **Watches** tab allows you to monitor variables and complex C expressions.
 - Click `Add Watch / Expression` to add a new item.
 - Double-click a value to modify it manually.
 - Values that changed since the last stop are highlighted in light blue.
 
-### 4.2 Live Watch
+### 5.2 Live Watch
 - The **Live** tab allows you to monitor variables in real-time while the target is running (requires probe support like J-Link).
 - Configure the update rate in milliseconds at the bottom of the tab.
 
-### 4.3 Registers
+### 5.3 Registers
 - The **Registers** tab shows the current state of CPU registers.
 - Use `Export Registers` to save the current state to a file.
 
-### 4.4 Call Stack
+### 5.4 Call Stack
 - The **Call Stack** tab shows the chain of function calls that led to the current execution point.
 - Double-click a frame to jump to that location in the source code and view local variables for that context.
 
-### 4.5 Threads / RTOS Awareness
+### 5.5 Threads / RTOS Awareness
 - The **Threads** tab displays active threads or RTOS tasks (if detected).
 - Shows thread ID, name, state (Running, Blocked, etc.), and current frame.
 
-### 4.6 Memory View
+### 5.6 Memory View
 - The **Memory** tab allows you to inspect and modify raw memory.
 - Enter an address (e.g., `0x20000000`) and click `Read`.
 - Right-click in the memory view to:
@@ -112,34 +135,41 @@ OzonePy provides several ways to control the execution of your program:
 
 ---
 
-## 5. Advanced Features
+## 6. Advanced Features
 
-### 5.1 Code Coverage
+### 6.1 Code Coverage
 - Enable via `File` -> `Enable Code Coverage`.
 - The **Coverage** tab shows hits per function and overall percentage.
 - Source lines that have been executed are highlighted (if supported).
 
-### 5.2 Hover Tooltips
+### 6.2 Hover Tooltips
 - Hover your mouse over any variable in the source code to see its current value in a small tooltip.
 
-### 5.3 Inline Variables
+### 6.3 Inline Variables
 - Toggle `Debug` -> `Show Inline Variables` to see the values of variables directly at the end of the source lines where they are used.
 
-### 5.4 Debug Log
+### 6.4 Debug Log
 - Go to `File` -> `Show Debug Log` to see the raw communication between OzonePy and GDB. This is useful for troubleshooting.
 
-### 5.5 GDB Console
+### 6.5 GDB Console
 - A full-featured GDB console is available at the bottom of the interface.
 - You can enter any GDB command manually.
 - Output from GDB (including command responses and status updates) is displayed in the console window.
 
 ---
 
-## 6. Customization
-- **Colors**: Customize the source code highlighter and UI colors via `File` -> `Color Settings...`.
+## 7. Customization
+- **Appearance Settings**: Customize the source code highlighter, line numbers, and UI colors via `File` -> `Appearance Settings...`.
+    - **Colors**: Set colors for comments, code foreground/background, line numbers, italic variables, breakpoints, and the current execution line.
+    - **Fonts**: Individually configure the font family and size for:
+        - **Normal Code**: The base font for the source view.
+        - **Comments**: Used for C/C++ comments (`//`, `/* */`).
+        - **Italics**: Used for inline variables and variable tooltips.
+        - **Line Numbers**: The font used in the sidebar for line numbers.
+        - *Note: To maintain perfect alignment between line numbers and code, it is recommended to use the same font size for both.*
 - **OS Selection**: Set your host operating system via `File` -> `Operating System` to ensure correct path handling.
 
-### 6.1 SSH Tunnelling (Deep Dive)
+### 7.1 SSH Tunnelling (Deep Dive)
 SSH Tunneling is particularly useful when the debugging hardware (like a J-Link) is connected to a computer in a different location (the "Remote Host"), but you want to run the OzonePy debugger on your local machine.
 
 - **Requirements**: The Remote Host must have an SSH server running and have the GDB server (J-Link, OpenOCD, etc.) already started and listening.
